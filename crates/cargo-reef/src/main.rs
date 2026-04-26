@@ -850,9 +850,61 @@ async fn migrate_revert(cfg: &StorageConfig) -> Result<()> {
 //  Output styling
 // ============================================================================
 
+/// Random sea/reef-themed status messages shown by every top-level command.
+/// One is picked per invocation, weighted equally — gives Reef a bit of
+/// personality without commit to a single tagline.
+const BANNERS: &[&str] = &[
+    // 🦀 crab
+    "🦀  Scuttling…",
+    "🦀  Skittering…",
+    "🦀  Crabwalking…",
+    "🦀  Sidestepping…",
+    "🦀  Pinching…",
+    "🦀  Molting…",
+    // 🪸 coral
+    "🪸  Branching out…",
+    "🪸  Calcifying…",
+    "🪸  Anchoring…",
+    "🪸  Reefing in…",
+    // 🐚 shell
+    "🐚  Shelling…",
+    "🐚  Spiraling…",
+    "🐚  Pearling…",
+    // 🫧 bubble
+    "🫧  Bubbling up…",
+    "🫧  Frothing…",
+    "🫧  Effervescing…",
+    // 🌊 wave
+    "🌊  Cresting…",
+    "🌊  Surfing in…",
+    // 🐙🪼🐠🐡🦐🤿 misc sea life
+    "🐙  Tentacling…",
+    "🪼  Drifting…",
+    "🐠  Darting…",
+    "🐡  Puffing up…",
+    "🦐  Schooling…",
+    "🤿  Diving in…",
+    // The classic — keeps the original feel as a rare callback
+    "🦀  Welcome to the Reef.",
+];
+
 fn print_banner() {
+    // Hash the current time (full nanos since epoch + process id) and modulo.
+    // Direct `nanos % BANNERS.len()` aliases badly — calls a fraction of a
+    // second apart land in the same bucket because the time delta is divisible
+    // by small numbers. Hashing scrambles the bits so consecutive calls spread
+    // across the table evenly. Cheap, no `rand` dep.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut h);
+    std::process::id().hash(&mut h);
+    let idx = (h.finish() as usize) % BANNERS.len();
     println!();
-    println!("{}", style("🦀  Welcome to the Reef.").bold().cyan());
+    println!("{}", style(BANNERS[idx]).bold().cyan());
     println!();
 }
 
