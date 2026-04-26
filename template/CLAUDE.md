@@ -26,7 +26,7 @@ dx build --bin core --release --web      # production
 dx build --bin cloud --release --web
 
 # Manual feature override (rarely needed — required-features handles it)
-dx serve --features "nexus extra-stuff" --no-default-features --web
+dx serve --features "cloud extra-stuff" --no-default-features --web
 
 # Fullstack with different bin per side (when client and server are separate bins)
 dx serve @client --bin webapp @server --bin api --web
@@ -317,17 +317,126 @@ Use `dioxus::server::axum::*` re-exports — don't add `axum` as a direct dep (a
 Native-only, gated by `cfg(feature = "server")`. Module layout:
 
 - `db/mod.rs` — `Db` struct (Arc<libsql::Database>) with `Db::new()`, `Db::from_env()`, `default_db()` lazy global.
-- `db/schema.rs` — Rust row types. **In v0.5, this becomes the SSOT for the schema** — `cargo reef db:push` will diff it against the live DB and generate migrations (Drizzle-style). For v0.1, kept in sync with `migrations/*.sql` by hand.
+- `db/schema.rs` — `#[reef::table]` row types. **Single source of truth for the DB shape.** `cargo reef db:push` parses this file, diffs against the live DB, and applies migrations. See "Schema-as-code" below.
 - `queries.rs` — all SELECTs. Functions take `&Db` for testability.
 - `actions.rs` — all writes (INSERT/UPDATE/DELETE). Same pattern.
 
-**The migration runner does NOT live in user projects.** Migrations are run via `cargo reef migrate run` (CLI in `cargo-reef` — not yet built). For dev convenience until the CLI ships:
+**Migrations** live in `migrations/` and are applied by `cargo reef migrate run`. The runner records what it applied in a `schema_migrations` table so re-runs are idempotent. `Db::new()` does NOT auto-run migrations — invoking the runner is a deployment concern, not an app concern.
 
 ```bash
-for f in migrations/*.sql; do sqlite3 ./data/reef.db < "$f"; done
+cargo reef migrate run                  # apply pending migrations
+cargo reef migrate new add_users_table  # generate a hand-authored migration file
+cargo reef migrate status               # show applied vs pending
+cargo reef migrate revert               # roll back last applied (requires *.down.sql)
 ```
 
-`Db::new()` does not auto-run migrations. The user's app code never invokes the migration runner — it's framework infrastructure.
+---
+
+## Schema-as-code (`#[reef::table]` + `cargo reef db:push`)
+
+The `#[reef::table]` attribute makes a Rust struct simultaneously the row type AND the table declaration. There's no separate "tables enum" or migration DSL — the struct IS both.
+
+```rust
+use reef::{Json, Jsonb};
+use serde::{Deserialize, Serialize};
+
+#[reef::table(strict)]
+#[index(name = "users_email_idx", columns = ["email"])]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct User {
+    #[column(primary_key, auto_increment)]
+    pub id: i64,
+    #[column(unique)]
+    pub email: String,
+    pub name: String,
+    pub bio: Option<String>,                          // → TEXT (nullable from Option<T>)
+    pub tags: Json<Vec<String>>,                      // → TEXT (JSON-encoded)
+    pub metadata: Jsonb<UserMetadata>,                // → BLOB (JSONB, SQLite 3.45+)
+    #[column(default = "active",
+             check = "status IN ('active','disabled')")]
+    pub status: String,
+}
+```
+
+The same `User` struct is used by `queries::*` (deserialized from row results) and by `db:push` (parsed by `cargo-reef` to know what `users` should look like).
+
+### The two coexisting workflows
+
+`cargo reef migrate run` and `cargo reef db:push` share the `schema_migrations` tracking table. Two ways to use them:
+
+| Workflow | When to use |
+|---|---|
+| **`migrate run` for bootstrap, `db:push` for iteration** | Most projects. Edit `schema.rs`, `db:push`, repeat. For prod deploys, capture each diff with `db:push --write <name>` so CI can apply via `migrate run`. |
+| **All file-based** (`migrate new` + `migrate run`) | Teams that want every migration hand-authored and code-reviewed. `schema.rs` becomes documentation. |
+
+### `cargo reef db:push` essentials
+
+```bash
+cargo reef db:push                  # preview, prompt, apply
+cargo reef db:push -y               # apply without prompting
+cargo reef db:push --dry-run        # preview only
+cargo reef db:push --write add_foo  # capture as migrations/<ts>_add_foo.sql
+cargo reef db:push --allow-drop     # required to apply diffs that DROP a table or column
+cargo reef db:push --features X,Y   # filter cfg-gated tables to this feature set
+```
+
+**Safety guardrails baked in:**
+- Drops (`DROP TABLE` / `DROP COLUMN`) preview but require `--allow-drop` to apply.
+- Mixed auto + manual migrations refuse silent partial application.
+- Adding a NOT NULL column without DEFAULT is flagged as needing a manual migration (SQLite can't backfill).
+- Tightening changes (NULL → NOT NULL) emit a warning — libSQL's `ALTER COLUMN` only applies to new writes; existing rows aren't revalidated.
+
+### Attribute reference
+
+**Table-level — `#[reef::table(...)]`:**
+- `name = "..."` — override the SQL table name (default: snake_case of struct name, NO pluralization)
+- `strict` — emit as a SQLite STRICT table (3.37+)
+- `without_rowid` — emit as a WITHOUT ROWID table
+
+**Field-level — `#[column(...)]`:**
+- `primary_key`, `auto_increment`, `unique`
+- `default = <expr>` — string literals get SQL-quoted, numerics emit raw
+- `check = "<sql_expr>"`, `references = "table(col)"`
+- `on_delete` / `on_update` — `cascade`, `restrict`, `set_null`, `set_default`, `no_action`
+- `generated = "<sql_expr>"`, `generated_kind = "stored"` | `"virtual"`
+
+**Struct-level helpers (absorbed by `#[reef::table]`):**
+- `#[index(name = "...", columns = [...], unique)]` — single or multi-column, supports expression indexes (`json_extract(meta, '$.path')`)
+- `#[primary_key(columns = [...])]` — composite PK
+- `#[foreign_key(columns = [...], references = "table(c1, c2)", on_delete = "...", on_update = "...")]` — composite FK
+- `#[check(name = "...", expr = "...")]` — named table-level CHECK
+
+**Type mapping (Rust → SQL):**
+- `String` / `i64` / `f64` / `bool` / `Vec<u8>` → TEXT / INTEGER / REAL / INTEGER / BLOB (NOT NULL implicit)
+- `Option<T>` → unwrap to T's SQL type, mark nullable
+- `Json<T>` → TEXT (JSON-encoded; transparent serde wrapper)
+- `Jsonb<T>` → BLOB (JSONB-encoded)
+- Everything else (custom structs, `Vec<T>` for non-`u8`, `HashMap`) errors with a "wrap in `Json<>` / `Jsonb<>`" suggestion
+
+### Multi-deployment via `#[cfg]` gates
+
+When this app is built into multiple binaries (per Reefer Rule 3 — one binary per role), use `#[cfg(feature = "...")]` to gate which tables exist in which build:
+
+```rust
+#[reef::table] pub struct User { ... }                         // always
+#[reef::table] pub struct Post { ... }                         // always
+
+#[cfg(feature = "cloud")]
+#[reef::table] pub struct Tenant { ... }                       // SaaS build only
+
+#[cfg(feature = "desktop")]
+#[reef::table] pub struct OfflinePref { ... }                  // desktop build only
+```
+
+Then `db:push --features <set>` parses `schema.rs` through that feature view, so each binary's deployment migrates only the tables it actually compiles. The cfg evaluator handles `feature`, `not`, `all`, `any`, and arbitrary nesting.
+
+Cross-table FK validation runs **after** cfg filtering, so a FK that only exists in a feature-gated table doesn't break builds where the gate is off.
+
+### What this replaces
+
+If you've used Drizzle, this is the same `db:push` / `db:generate` model. If you've used Diesel or Active Record, the row type IS the schema declaration — no separate `schema.rs` macro file or `tables.rs` enum. There's nothing else to keep in sync.
+
+**Don't create a `tables.rs` enum** to identify or dispatch on tables — the struct's type identity already does that. For role-based access enforcement (e.g., "this code can only write public tables, not admin tables"), use module structure + Cargo features, not a runtime enum. The compiler enforces the boundary at zero runtime cost.
 
 ---
 

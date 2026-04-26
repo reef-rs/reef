@@ -66,8 +66,8 @@ optional_targets = ["desktop", "mobile"]
 
 # Named binaries — `cargo reef build --bin <name>` selects one
 [build.bins]
-core   = { features = ["customer"],          platforms = ["web", "server"] }
-admin  = { features = ["customer", "nexus"], platforms = ["web", "server"] }
+core   = { features = ["public"],         platforms = ["web", "server"] }
+admin  = { features = ["public", "cloud"], platforms = ["web", "server"] }
 
 [build.tailwind]
 enabled = true

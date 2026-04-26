@@ -41,9 +41,9 @@ optional_targets = ["desktop", "mobile"]
 # one of these. If `bins` is empty, cargo-reef invokes `dx build` once with
 # the project's default bin.
 [build.bins]
-core   = { features = ["customer"],         platforms = ["web", "server"] }
-admin  = { features = ["customer", "nexus"], platforms = ["web", "server"] }
-edge   = { features = ["customer", "edge"],  platforms = ["server"] }
+core   = { features = ["public"],         platforms = ["web", "server"] }
+admin  = { features = ["public", "cloud"], platforms = ["web", "server"] }
+edge   = { features = ["public", "edge"],  platforms = ["server"] }
 
 [build.tailwind]
 enabled = true
@@ -77,10 +77,10 @@ hash_for_cache_busting = true   # manganis already does this; this just toggles 
 
 ```bash
 # `cargo reef build` with two bins × two platforms ≡ four dx invocations:
-dx build --bin core  --features customer        --release --web
-dx build --bin core  --features customer        --release --server
-dx build --bin admin --features customer,nexus  --release --web
-dx build --bin admin --features customer,nexus  --release --server
+dx build --bin core  --features public        --release --web
+dx build --bin core  --features public        --release --server
+dx build --bin admin --features public,cloud  --release --web
+dx build --bin admin --features public,cloud  --release --server
 ```
 
 Plus tailwindcss prebuild + asset optimization, all serialized so failure short-circuits.

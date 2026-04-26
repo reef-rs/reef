@@ -12,20 +12,29 @@ cargo reef <subcommand> [flags]
 
 | Subcommand | Status | Purpose |
 |---|---|---|
-| `new <name>` | TODO | Scaffold a new Reef app from the embedded template |
-| `build` | TODO | Read `.reef/config.toml`, run `dx build` for each configured target/bin |
-| `deploy` | TODO | Read `.reef/config.toml` `[deploy]`, ship the built artifact to the target |
-| `dev` | TODO | Thin wrapper around `dx serve --web` with Reef-specific banner + reload hooks |
-| `migrate run` | TODO | Apply pending SQL migrations from `migrations/` to the configured DB |
-| `migrate new <name>` | TODO | Generate a timestamped migration file in `migrations/` |
-| `migrate status` | TODO | Show applied vs pending migrations |
-| `migrate revert` | TODO | Roll back the last applied migration (when DOWN files exist) |
-| `db:push` | v0.5+ | Diff `src/server/db/schema.rs` (SSOT) against live DB, generate + apply migration |
-| `db:reset` | v0.5+ | Drop all tables, reapply migrations (dev only) |
+| `new <name>` | **v0.2** | Scaffold a new Reef app from the embedded template |
+| `dev` | **v0.2** | Sugar over `dx serve --web` with a Reef banner; passes through extra args |
+| `migrate run` | **v0.2** | Apply pending SQL migrations from `migrations/` to the configured DB |
+| `migrate new <name>` | **v0.2** | Generate a timestamped migration file in `migrations/` (optional `--with-down`) |
+| `migrate status` | **v0.2** | Show applied vs pending migrations |
+| `migrate revert` | **v0.2** | Roll back the last applied migration (when `*.down.sql` exists) |
+| `db:push` | **v0.2** | Diff `src/server/db/schema.rs` (SSOT) against live DB, preview, apply or `--write` to a migration file. Supports `--features` for cfg-aware multi-deployment schemas. |
+| `build` | TODO (v0.5) | Read `.reef/config.toml`, run `dx build` for each configured target/bin |
+| `deploy` | TODO (v0.5) | Read `.reef/config.toml` `[deploy]`, ship the built artifact to the target |
+| `db:reset` | TODO (v0.5+) | Drop all tables, reapply migrations (dev only) |
 | `db:seed` | TODO | Run user-defined seed function (declared via attribute) |
 | `doctor` | TODO | Diagnose common config issues (`Dioxus.toml`, `Cargo.toml`, env vars) |
 | `upgrade` | TODO | Upgrade the project to a newer Reef version (codemod for known migrations) |
-| `--version` / `--help` | TODO | Standard |
+| `--version` / `--help` | **v0.2** | Standard |
+
+**Hidden debug commands** (not in `--help`, but callable for parser/diff inspection):
+
+| Subcommand | Purpose |
+|---|---|
+| `_debug-schema [path] [--features=...]` | Parse `schema.rs`, print the IR as JSON |
+| `_debug-sql [path] [--features=...]` | Parse `schema.rs`, print emitted CREATE TABLE / INDEX SQL |
+| `_debug-introspect [db]` | Read live DB via PRAGMA, print the IR as JSON (the inverse of `_debug-sql`) |
+| `_debug-diff --schema=... --db=... [--features=...]` | Run the diff and render the human preview without applying |
 
 ---
 
@@ -56,7 +65,7 @@ $ cargo reef new my-app
   ▸ Cloud-first web app          (Dioxus web + cloud backend, Vercel-style)
     Offline-first thick client   (Dioxus desktop + embedded libSQL, no backend)
     Hybrid: cloud + thick client (offline-capable, syncs when online)
-    Edge-distributed             (cloud + customer-managed edge devices)
+    Edge-distributed             (cloud + self-managed edge devices)
     Mobile (iOS / Android)       (Dioxus mobile + cloud backend)
 
 ? Auth?

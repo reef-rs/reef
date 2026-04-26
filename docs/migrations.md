@@ -109,16 +109,18 @@ Pending:
 
 Rolls back the last applied migration. Requires a `<timestamp>_<name>.down.sql` to exist for that migration. If missing, fails with "no DOWN script for <name>".
 
-## v0.5: schema-as-code (`cargo reef db:push`)
+## Schema-as-code (`cargo reef db:push`) — shipped in v0.2
 
-Long-term plan: `src/server/db/schema.rs` becomes the single source of truth (Drizzle-style). `cargo reef db:push`:
+`src/server/db/schema.rs` is the single source of truth for the DB shape. `cargo reef db:push` parses it, diffs against the live DB, and applies the changes (Drizzle-style).
 
-1. Read `schema.rs`, build an in-memory schema description (proc-macro-derived via `#[reef::table]` etc.)
-2. Read live DB schema via `PRAGMA table_info(...)` etc.
-3. Diff — compute the SQL needed to bring live up to date with `schema.rs`
-4. Generate a new `migrations/<timestamp>_<auto>.sql` and apply it (or write to disk for review depending on flag)
+See **[`db-push.md`](./db-push.md)** for the full surface — schema syntax (`#[reef::table]`, `#[column]`, `#[index]`, etc.), the `--features` flag for cfg-aware multi-deployment schemas, the diff preview format, and safety guardrails (`--allow-drop`, NOT NULL backfill rules, libSQL ALTER COLUMN tightening).
 
-Migrations remain on-disk, version-controlled, and replayable — same as today. The user just doesn't write them by hand anymore.
+**Coexistence with this command:** `migrate run` and `db:push` share the `schema_migrations` tracking table. Two common workflows:
+
+1. **`migrate run` for bootstrap, `db:push` for iteration.** Template ships with an init migration that creates the starter schema; `db:push` handles every subsequent change. For production, use `db:push --write <name>` to capture each diff as a versioned migration file that CI applies via `migrate run`.
+2. **All file-based.** Hand-author every migration with `migrate new <name>` and `migrate run`. Treat `schema.rs` as documentation that mirrors the SQL.
+
+The schema is `Drizzle-like` — diff-driven from a Rust source-of-truth — but you can opt out per project.
 
 ## What this is NOT
 

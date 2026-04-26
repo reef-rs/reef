@@ -3,7 +3,7 @@
 //! When a project uses Cargo features to gate which `#[reef::table]` structs
 //! are part of which build (per Reefer Rule 3 — "one binary per role"), the
 //! parser needs to evaluate cfg predicates against the active feature set so
-//! `cargo reef db:push --features server,nexus` only includes the tables
+//! `cargo reef db:push --features server,cloud` only includes the tables
 //! that build would compile.
 //!
 //! Supports the cfg shapes that account for ~all real-world schema.rs gating:
@@ -150,60 +150,60 @@ mod tests {
 
     #[test]
     fn unconstrained_includes_everything() {
-        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(feature = "nexus")])];
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(feature = "cloud")])];
         assert!(active(attrs, &FeatureSet::Unconstrained));
     }
 
     #[test]
     fn simple_feature() {
-        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(feature = "nexus")])];
-        assert!(active(attrs.clone(), &fs(&["nexus"])));
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(feature = "cloud")])];
+        assert!(active(attrs.clone(), &fs(&["cloud"])));
         assert!(!active(attrs, &fs(&["server"])));
     }
 
     #[test]
     fn not_feature() {
-        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(not(feature = "nexus"))])];
-        assert!(!active(attrs.clone(), &fs(&["nexus"])));
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[cfg(not(feature = "cloud"))])];
+        assert!(!active(attrs.clone(), &fs(&["cloud"])));
         assert!(active(attrs, &fs(&["server"])));
     }
 
     #[test]
     fn all_features() {
         let attrs: Vec<Attribute> =
-            vec![parse_quote!(#[cfg(all(feature = "server", feature = "nexus"))])];
-        assert!(active(attrs.clone(), &fs(&["server", "nexus"])));
+            vec![parse_quote!(#[cfg(all(feature = "server", feature = "cloud"))])];
+        assert!(active(attrs.clone(), &fs(&["server", "cloud"])));
         assert!(!active(attrs.clone(), &fs(&["server"])));
-        assert!(!active(attrs, &fs(&["nexus"])));
+        assert!(!active(attrs, &fs(&["cloud"])));
     }
 
     #[test]
     fn any_features() {
         let attrs: Vec<Attribute> =
-            vec![parse_quote!(#[cfg(any(feature = "edge", feature = "nexus"))])];
-        assert!(active(attrs.clone(), &fs(&["edge"])));
-        assert!(active(attrs.clone(), &fs(&["nexus"])));
-        assert!(active(attrs.clone(), &fs(&["edge", "nexus"])));
+            vec![parse_quote!(#[cfg(any(feature = "desktop", feature = "cloud"))])];
+        assert!(active(attrs.clone(), &fs(&["desktop"])));
+        assert!(active(attrs.clone(), &fs(&["cloud"])));
+        assert!(active(attrs.clone(), &fs(&["desktop", "cloud"])));
         assert!(!active(attrs, &fs(&["server"])));
     }
 
     #[test]
     fn nested_predicates() {
         let attrs: Vec<Attribute> = vec![parse_quote!(
-            #[cfg(all(feature = "server", not(feature = "edge")))]
+            #[cfg(all(feature = "server", not(feature = "desktop")))]
         )];
         assert!(active(attrs.clone(), &fs(&["server"])));
-        assert!(!active(attrs.clone(), &fs(&["server", "edge"])));
-        assert!(!active(attrs, &fs(&["edge"])));
+        assert!(!active(attrs.clone(), &fs(&["server", "desktop"])));
+        assert!(!active(attrs, &fs(&["desktop"])));
     }
 
     #[test]
     fn multiple_cfg_attrs_anded() {
         let attrs: Vec<Attribute> = vec![
             parse_quote!(#[cfg(feature = "server")]),
-            parse_quote!(#[cfg(feature = "nexus")]),
+            parse_quote!(#[cfg(feature = "cloud")]),
         ];
-        assert!(active(attrs.clone(), &fs(&["server", "nexus"])));
+        assert!(active(attrs.clone(), &fs(&["server", "cloud"])));
         assert!(!active(attrs, &fs(&["server"])));
     }
 
