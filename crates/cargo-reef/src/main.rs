@@ -341,13 +341,77 @@ fn run_dev(extra: &[String]) -> Result<()> {
         );
     }
 
+    spawn_dx_with_cleanup(extra)
+}
+
+/// Spawn `dx serve` with shutdown semantics that propagate to its subprocess
+/// tree. dx itself spawns several long-lived children (the WASM compiler, the
+/// server binary, hot-reload watchers); without active cleanup, Ctrl-C in the
+/// terminal can leave them as orphans (we've seen ~4-hour-old `dx serve`
+/// processes accumulate this way).
+///
+/// Strategy: put dx into its own process group, then on SIGINT/SIGTERM/SIGHUP
+/// kill the whole group via `kill(-pgid)`. dx and every descendant get the
+/// signal at once.
+#[cfg(unix)]
+fn spawn_dx_with_cleanup(extra: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Arc;
+
+    let mut child = std::process::Command::new("dx")
+        .arg("serve")
+        .arg("--web")
+        .args(extra)
+        // process_group(0) puts the child in a new group with itself as
+        // leader, so dx's own descendants inherit that PGID.
+        .process_group(0)
+        .spawn()
+        .context("launching dx serve")?;
+
+    let pgid = Arc::new(AtomicI32::new(child.id() as i32));
+    let pgid_for_handler = pgid.clone();
+    // ctrlc handler runs on SIGINT, SIGTERM, and (on unix) SIGHUP. It only
+    // gets installed once per process — set_handler errors on a second call,
+    // which we ignore since the second binary call won't happen in practice.
+    let _ = ctrlc::set_handler(move || {
+        let pid = pgid_for_handler.load(Ordering::SeqCst);
+        if pid > 0 {
+            // Negate the PID to target the entire process group. SIGTERM gives
+            // dx a chance to flush; if it ignores us, the parent process exit
+            // below sends SIGHUP to anything still attached to the terminal.
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+        }
+    });
+
+    let status = child.wait().context("waiting on dx serve")?;
+    // Best-effort: even on a clean exit, sweep the group in case dx left
+    // anything behind. Errors are expected and ignored (no such process).
+    let pid = pgid.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+    }
+
+    if !status.success() {
+        bail!("dx serve exited with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn spawn_dx_with_cleanup(extra: &[String]) -> Result<()> {
+    // Windows path: rely on the OS's default Ctrl-C semantics. Job objects
+    // would give equivalent cleanup but we don't ship a Windows build today.
     let status = std::process::Command::new("dx")
         .arg("serve")
         .arg("--web")
         .args(extra)
         .status()
         .context("launching dx serve")?;
-
     if !status.success() {
         bail!("dx serve exited with status {status}");
     }
