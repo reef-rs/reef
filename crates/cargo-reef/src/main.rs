@@ -328,7 +328,18 @@ fn init_git(target: &Path) {
 
 fn run_dev(extra: &[String]) -> Result<()> {
     print_banner();
-    println!("{}", style("Starting dev loop (dx serve --web)…").dim());
+    println!("{}", style("Starting dev loop (dx serve --web --verbose)…").dim());
+    println!(
+        "{}",
+        style("First-time compile takes 5-10 min (libsql + WASM + 268 deps from scratch). \
+               Subsequent runs are fast.")
+            .dim()
+    );
+    println!(
+        "{} {}",
+        style("Server will be live at").dim(),
+        style("http://127.0.0.1:8080").bold().cyan()
+    );
     println!();
 
     // Verify dx is installed before we exec — friendlier error than a "not found" trap
@@ -341,7 +352,20 @@ fn run_dev(extra: &[String]) -> Result<()> {
         );
     }
 
-    spawn_dx_with_cleanup(extra)
+    // Pass `--verbose` to dx so cargo's compile output streams through.
+    // Without this, dx is silent for the entire 5-10min cold compile and
+    // users (reasonably) think it's hung. The user can override by passing
+    // their own verbosity flag in `extra` — clap dedup is up to dx.
+    let user_set_verbosity = extra
+        .iter()
+        .any(|a| matches!(a.as_str(), "--verbose" | "--trace" | "--quiet" | "-q"));
+    let mut args: Vec<String> = Vec::with_capacity(extra.len() + 1);
+    if !user_set_verbosity {
+        args.push("--verbose".into());
+    }
+    args.extend(extra.iter().cloned());
+
+    spawn_dx_with_cleanup(&args)
 }
 
 /// Spawn `dx serve` with shutdown semantics that propagate to its subprocess
