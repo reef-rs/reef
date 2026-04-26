@@ -1,0 +1,23 @@
+[package]
+name = "cargo-reef"
+version = "0.1.0"
+edition = "2021"
+description = "CLI scaffolder for Reef apps. `cargo reef new my-app` creates a fully-wired Rust full-stack app (Dioxus + libSQL + Tailscale + Fly)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/reef-rs/cargo-reef"
+homepage = "https://reef.rs"
+documentation = "https://docs.rs/cargo-reef"
+readme = "README.md"
+keywords = ["cli", "scaffold", "fullstack", "dioxus", "framework"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "cargo-reef"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+include_dir = "0.7"
+anyhow = "1"
+console = "0.16"     # styled terminal output
+dialoguer = "0.11"   # interactive prompts (used in v0.2+; harmless to include now)

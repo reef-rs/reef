@@ -1,0 +1,5 @@
+/target
+
+# build.rs vendors reef-template/ here at every build. Regenerated, not committed.
+# For `cargo publish` we'll need to vendor it intentionally — TODO when we publish.
+/template
