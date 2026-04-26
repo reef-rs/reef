@@ -33,8 +33,11 @@ tracing-subscriber = { version = "0.3", optional = true }
 
 # Reef runtime — schema-as-code attribute (`#[reef::table]`) and Json/Jsonb
 # wrappers, consumed by `cargo reef db:push`. Server-only because schema.rs
-# lives under `src/server/db/`. Pinned to git until reef hits crates.io.
-reef = { git = "https://github.com/reef-rs/cargo-reef", optional = true }
+# lives under `src/server/db/`. Crates.io name is `reef-rs` (the unhyphenated
+# `reef` was taken by an unrelated package); the `package = "reef-rs"` rename
+# here lets the import path stay `reef::*` in code. Pinned to git until 0.2.0
+# publishes to crates.io.
+reef = { git = "https://github.com/reef-rs/reef", package = "reef-rs", optional = true }
 
 # ---- Web-only (gated by `web` feature) ------------------------------------
 # (none yet for v0.1; e.g. web-sys, wasm-bindgen-futures would go here)

@@ -10,7 +10,10 @@ members = [
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/reef-rs/cargo-reef"
+# Points at the post-rename URL (reef-rs/cargo-reef → reef-rs/reef). GitHub
+# auto-redirects in either direction, so this resolves correctly even before
+# the rename happens.
+repository = "https://github.com/reef-rs/reef"
 homepage = "https://reef.rs"
 authors = ["Matt Drulia"]
 
