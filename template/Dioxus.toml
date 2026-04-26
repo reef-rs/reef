@@ -1,0 +1,50 @@
+[application]
+name = "reef-template"
+
+# dx's default platform when no explicit --platform / --web / --desktop flag.
+# Valid values: "web" | "desktop" | "server" | "liveview" |
+#               "macos" | "windows" | "linux" | "ios" | "android"
+#
+# NOTE: there is NO "fullstack" platform value. For a fullstack app, set this
+# to "web" — when the dioxus crate has the `fullstack` feature enabled (see
+# Cargo.toml), dx auto-spawns the server alongside the WASM client.
+default_platform = "web"
+
+# Build artifacts land here.
+out_dir = "dist"
+
+# Files in this directory are auto-copied to `out_dir` after a build/serve.
+# Things referenced via `asset!("/assets/foo.png")` get manganis-hashed URLs;
+# files referenced directly (e.g. `/favicon.png` in a Link tag) are served
+# from this folder at the path you give.
+asset_dir = "assets"
+
+[web.app]
+title = "Reef"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+# Important for SPA routing: serve index.html on unknown paths so the
+# Dioxus router can match them client-side.
+index_on_404 = true
+
+[web.resource]
+# Stylesheets pulled in directly (not via the asset! macro). Files at these
+# paths are served from `asset_dir`. Using direct paths instead of asset!()
+# means no hash in the URL — predictable, useful for things like /tailwind.css.
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []
+
+# ---- Bundle config (for `dx bundle` desktop/mobile distribution) ----
+# Not used by `dx serve` (fullstack web). Populate when shipping desktop /
+# mobile binaries via tauri-bundler under the hood.
+[bundle]
+identifier = "rs.reef.template"
+publisher = "Reef"
+copyright = "Copyright 2026"
+category = "DeveloperTool"

@@ -1,0 +1,12 @@
+# Reefer Ruleset enforcement at lint level.
+# See docs/ruleset.md for the principles these encode.
+
+# Rule 5: trust the type system, not the README. Don't .unwrap() / .expect()
+# in production paths — surface errors via Result.
+disallowed-methods = []
+
+# Rule 12: unsafe and Box<dyn Trait> should make you stop and think.
+# Configured via lint level in lib.rs / main.rs.
+
+# Don't accidentally ship dbg!() prints.
+allow-dbg-in-tests = true

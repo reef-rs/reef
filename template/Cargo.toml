@@ -1,0 +1,79 @@
+[package]
+name = "reef-template"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# ============================================================================
+#  Dependencies
+# ============================================================================
+#
+# Grouped by where they compile. Server-only deps are `optional = true` and
+# enabled by the `server` feature — the linker drops them entirely when
+# building for WASM.
+#
+# Add a dep:
+#   - shared (UI + server use it)        → top block
+#   - server-only (DB, axum, tokio)      → "Server" block, mark `optional = true`,
+#                                          add `dep:<name>` to `server` feature
+#   - web-only (wasm-bindgen-future, etc) → "Web" block, mark `optional = true`,
+#                                          add `dep:<name>` to `web` feature
+
+[dependencies]
+# ---- Shared (always compiled, both targets) -------------------------------
+dioxus = { version = "0.7.6", features = ["fullstack", "router"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+
+# ---- Server-only (gated by `server` feature) ------------------------------
+tokio = { version = "1", features = ["full"], optional = true }
+libsql = { version = "0.9", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+# ---- Web-only (gated by `web` feature) ------------------------------------
+# (none yet for v0.1; e.g. web-sys, wasm-bindgen-futures would go here)
+
+# ============================================================================
+#  Features
+# ============================================================================
+#
+# Dioxus-fullstack idiom: ONE crate, multiple compile targets via features.
+# `dx serve` (no flags) auto-applies `web` for the WASM build and `server`
+# for the native build. Don't pass `--features server` manually — features
+# are global and would re-enable `dioxus/server` on the WASM build.
+#
+# Future: `cargo reef build` (v0.5) reads `.reef/config.toml` to decide
+# which targets to compile and orchestrates everything in one command.
+
+[features]
+# IMPORTANT: leave `default` empty. With `default = ["server"]`, dx classifies
+# the whole project as server-only and never builds the WASM client. Empty
+# defaults let dx independently apply `web` for the WASM build and `server`
+# for the native build during fullstack compilation.
+#
+# Trade-off: plain `cargo run` doesn't work without `--features server`. Use
+# `dx serve` (dev) or `dx build` (production) instead — they handle features
+# per target automatically.
+default = []
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+server = [
+    "dioxus/server",
+    "dep:tokio",
+    "dep:libsql",
+    "dep:tracing-subscriber",
+]
+
+# ============================================================================
+#  Profiles
+# ============================================================================
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

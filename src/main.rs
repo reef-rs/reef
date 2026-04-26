@@ -15,7 +15,8 @@ use clap::{Parser, Subcommand};
 use console::style;
 use include_dir::{include_dir, Dir, DirEntry};
 
-/// The reef-template, vendored by build.rs at compile time.
+/// The Reef template — committed alongside this crate at `template/`,
+/// embedded into the binary at compile time. Single source of truth.
 static TEMPLATE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/template");
 
 /// Cargo invokes us as `cargo-reef reef <args>` (cargo prepends the subcommand
@@ -59,10 +60,18 @@ fn main() -> Result<()> {
 //  cargo reef new <name>
 // ============================================================================
 
-fn scaffold_new(name: &str) -> Result<()> {
+fn scaffold_new(input: &str) -> Result<()> {
+    // Accept either a bare name (`my-app`) or a path (`../foo`, `/tmp/test-app`).
+    // The cargo package name is the basename; the directory is wherever the
+    // user pointed us.
+    let target = PathBuf::from(input);
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("could not derive a project name from `{input}`"))?;
+
     validate_name(name)?;
 
-    let target = PathBuf::from(name);
     if target.exists() {
         bail!(
             "directory `{}` already exists — pick a different name or remove it",
@@ -80,7 +89,7 @@ fn scaffold_new(name: &str) -> Result<()> {
 
     init_git(&target);
 
-    print_next_steps(name, count);
+    print_next_steps(input, name, count);
     Ok(())
 }
 
@@ -163,18 +172,19 @@ fn print_banner() {
     println!();
 }
 
-fn print_next_steps(name: &str, count: usize) {
+fn print_next_steps(path: &str, name: &str, count: usize) {
     println!();
     println!(
-        "{} Generated {} files in {}",
+        "{} Generated {} files in {} ({})",
         style("✓").green().bold(),
         count,
-        style(format!("./{name}")).bold()
+        style(path).bold(),
+        style(format!("package: {name}")).dim()
     );
     println!();
     println!("Next steps:");
     println!();
-    println!("  {} {}", style("$").dim(), style(format!("cd {name}")).bold());
+    println!("  {} {}", style("$").dim(), style(format!("cd {path}")).bold());
     println!("  {} {}", style("$").dim(), style("dx serve --web").bold());
     println!();
     println!(
