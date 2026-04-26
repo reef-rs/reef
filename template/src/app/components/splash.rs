@@ -13,18 +13,21 @@ pub fn Splash(props: SplashProps) -> Element {
     rsx! {
         main { class: "splash",
             div { class: "splash-card",
-                img { class: "splash-logo", src: "{props.logo}", alt: "Reef" }
+                div { class: "splash-logo-wrap",
+                    // Decorative bubbles drifting up behind the logo. Pure CSS,
+                    // no JS — keyframes in main.css.
+                    span { class: "bubble bubble-1" }
+                    span { class: "bubble bubble-2" }
+                    span { class: "bubble bubble-3" }
+                    span { class: "bubble bubble-4" }
+                    img { class: "splash-logo", src: "{props.logo}", alt: "Reef" }
+                }
                 h1 { class: "splash-title", "Welcome to the Reef" }
                 p { class: "splash-tagline",
-                    "Reef is a modern full-stack framework descended from the idiomatic cult of Rust. "
-                    "Developers who use it build in a state of profound, principled clarity — "
-                    "often misdiagnosed by outsiders as "
-                    em { "Reefer Madness" }
-                    ". We accept the diagnosis as a small price to pay for the smug sense of "
-                    "superiority earned by being "
-                    em { "pure" } ", " em { "correct" } ", and fast enough to ship a thick "
-                    "client, a 30 MB cloud binary, and an offline-capable edge node — "
-                    "all from the same codebase. 🦀"
+                    "A modern full-stack framework for Rust. "
+                    em { "Pure" } ", " em { "clean" } ", and " em { "fast" }
+                    " — ship a thick client, a 30 MB cloud binary, and an "
+                    "offline-capable edge node from one codebase. 🪸"
                 }
 
                 div { class: "splash-status",
@@ -47,7 +50,7 @@ pub fn Splash(props: SplashProps) -> Element {
                 div { class: "splash-links",
                     a { href: "https://reef.rs", "Docs" }
                     a { href: "https://github.com/reef-rs", "GitHub" }
-                    a { href: "https://crates.io/crates/reef-rs", "crates.io" }
+                    a { href: "https://crates.io/crates/reef", "crates.io" }
                 }
             }
         }

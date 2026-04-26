@@ -24,7 +24,10 @@ use dioxus::prelude::*;
 
 use crate::Route;
 
-const FAVICON: &str = "/favicon.png"; // served raw from public/
+// `asset!()` gives a content-hashed URL — defeats Chrome's aggressive favicon
+// cache, which otherwise serves a stale (or missing) icon for the lifetime of
+// the tab. Direct `/favicon.png` works too but loses cache-busting.
+const FAVICON: Asset = asset!("/assets/favicon.png");
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -33,7 +36,12 @@ pub fn RootLayout() -> Element {
     rsx! {
         // Document head — persistent across navigation
         document::Title { "Reef" }
-        document::Link { rel: "icon", href: FAVICON }
+        document::Link {
+            rel: "icon",
+            r#type: "image/png",
+            sizes: "32x32",
+            href: FAVICON,
+        }
         document::Stylesheet { href: TAILWIND }
         document::Stylesheet { href: MAIN_CSS }
 
