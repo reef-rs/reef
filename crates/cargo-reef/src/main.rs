@@ -78,6 +78,14 @@ enum ReefCommand {
         #[arg(default_value = "src/server/db/schema.rs")]
         path: std::path::PathBuf,
     },
+
+    /// Parse a `schema.rs` file and print the emitted SQL. Hidden — used to
+    /// eyeball the SQL emitter before `db:push` lands.
+    #[command(name = "_debug-sql", hide = true)]
+    DebugSql {
+        #[arg(default_value = "src/server/db/schema.rs")]
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -106,6 +114,7 @@ fn main() -> ExitCode {
         ReefCommand::Dev { extra } => run_dev(&extra),
         ReefCommand::Migrate { cmd } => run_migrate(cmd),
         ReefCommand::DebugSchema { path } => debug_schema(&path),
+        ReefCommand::DebugSql { path } => debug_sql(&path),
     };
 
     match result {
@@ -681,5 +690,13 @@ fn debug_schema(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("parsing {}", path.display()))?;
     let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
     println!("{json}");
+    Ok(())
+}
+
+fn debug_sql(path: &std::path::Path) -> Result<()> {
+    let schema = schema::parse_file(path)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let stmts = schema::emit_schema(&schema);
+    println!("{}", stmts.join("\n\n"));
     Ok(())
 }

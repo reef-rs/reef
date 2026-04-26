@@ -10,8 +10,10 @@
 //! `Json<T>` / `Jsonb<T>` wrappers errors with a "wrap in Json<>/Jsonb<>"
 //! suggestion.
 
+mod emit;
 mod ir;
 mod parse;
 mod types;
 
+pub use emit::emit_schema;
 pub use parse::parse_file;

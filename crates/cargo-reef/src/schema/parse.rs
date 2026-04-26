@@ -431,6 +431,11 @@ fn expr_string(e: &Expr) -> String {
     e.to_token_stream().to_string()
 }
 
+/// Convert a Rust struct identifier to a SQL table name. PascalCase → snake_case.
+/// Does NOT pluralize — `User` → `user`, `PostLike` → `post_like`. Users who
+/// want plural names declare them explicitly via `#[reef::table(name = "users")]`.
+/// Avoids the irregular-plural problem entirely (Box→boxes, Person→people, etc.)
+/// without pulling in a pluralization dep.
 fn snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, c) in s.chars().enumerate() {
@@ -442,11 +447,6 @@ fn snake_case(s: &str) -> String {
         } else {
             out.push(c);
         }
-    }
-    // Pluralize naively — a struct named `User` becomes table `users`.
-    // This matches Drizzle's convention but we can revisit if it surprises.
-    if !out.ends_with('s') {
-        out.push('s');
     }
     out
 }

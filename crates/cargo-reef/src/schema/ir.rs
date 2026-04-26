@@ -59,8 +59,7 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
-    /// SQL type token for `CREATE TABLE`. Used by the codegen step (not the parser).
-    #[allow(dead_code)]
+    /// SQL type token for `CREATE TABLE`.
     pub fn sql(&self) -> &'static str {
         match self {
             ColumnType::Integer => "INTEGER",
@@ -101,8 +100,7 @@ impl FkAction {
         })
     }
 
-    /// SQL keyword for `ON DELETE` / `ON UPDATE`. Used by the codegen step.
-    #[allow(dead_code)]
+    /// SQL keyword for `ON DELETE` / `ON UPDATE`.
     pub fn sql(self) -> &'static str {
         match self {
             Self::Cascade => "CASCADE",
