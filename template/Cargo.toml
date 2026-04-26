@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", optional = true }
 # `reef` was taken by an unrelated package); the `package = "reef-rs"` rename
 # here lets the import path stay `reef::*` in code. Pinned to git until 0.2.0
 # publishes to crates.io.
-reef = { git = "https://github.com/reef-rs/reef", package = "reef-rs", optional = true }
+reef = { git = "https://github.com/reef-rs/reef", package = "reef-rs", branch = "init-cli", optional = true }
 
 # ---- Web-only (gated by `web` feature) ------------------------------------
 # (none yet for v0.1; e.g. web-sys, wasm-bindgen-futures would go here)

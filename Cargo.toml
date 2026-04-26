@@ -5,6 +5,12 @@ members = [
     "crates/reef",
     "crates/reef-macros",
 ]
+# The template lives inside this directory tree but is NOT a workspace member —
+# it's the source that gets embedded into the cargo-reef binary at compile
+# time and copied out by `cargo reef new`. Without this exclude, Cargo would
+# try to absorb template/Cargo.toml into the workspace and fail because the
+# template targets a different dep set (Dioxus, libsql, etc.).
+exclude = ["template"]
 
 [workspace.package]
 version = "0.2.0"
