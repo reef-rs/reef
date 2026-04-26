@@ -37,7 +37,120 @@ pub fn parse_file(path: &Path) -> Result<Schema> {
         }
     }
 
-    Ok(Schema { tables })
+    let schema = Schema { tables };
+    validate_cross_refs(&schema)?;
+    Ok(schema)
+}
+
+/// Cross-table validation pass — ensures every FK reference points at a
+/// table and column(s) that actually exist in the schema. Catches typos
+/// like leftover plural names after renaming a struct.
+fn validate_cross_refs(schema: &Schema) -> Result<()> {
+    use std::collections::HashMap;
+
+    let table_cols: HashMap<&str, std::collections::HashSet<&str>> = schema
+        .tables
+        .iter()
+        .map(|t| {
+            (
+                t.name.as_str(),
+                t.columns.iter().map(|c| c.name.as_str()).collect(),
+            )
+        })
+        .collect();
+
+    let table_names: Vec<&str> = table_cols.keys().copied().collect();
+
+    for t in &schema.tables {
+        for col in &t.columns {
+            if let Some(fk) = &col.references {
+                check_fk_target(
+                    &table_cols,
+                    &table_names,
+                    &fk.table,
+                    std::slice::from_ref(&fk.column),
+                    &format!("{}.{} `references = \"{}({})\"`", t.rust_name, col.name, fk.table, fk.column),
+                )?;
+            }
+        }
+        for fk in &t.foreign_keys {
+            check_fk_target(
+                &table_cols,
+                &table_names,
+                &fk.references_table,
+                &fk.references_columns,
+                &format!(
+                    "{} `#[foreign_key(columns = [{}], references = \"{}({})\")]`",
+                    t.rust_name,
+                    fk.columns.join(", "),
+                    fk.references_table,
+                    fk.references_columns.join(", ")
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn check_fk_target(
+    table_cols: &std::collections::HashMap<&str, std::collections::HashSet<&str>>,
+    table_names: &[&str],
+    target_table: &str,
+    target_columns: &[String],
+    context: &str,
+) -> Result<()> {
+    let Some(cols) = table_cols.get(target_table) else {
+        let suggestion = closest_match(target_table, table_names)
+            .map(|m| format!(" (did you mean `{m}`?)"))
+            .unwrap_or_default();
+        bail!(
+            "{context}: target table `{target_table}` does not exist in this schema{suggestion}"
+        );
+    };
+    for c in target_columns {
+        if !cols.contains(c.as_str()) {
+            let known: Vec<&str> = cols.iter().copied().collect();
+            let suggestion = closest_match(c, &known)
+                .map(|m| format!(" (did you mean `{m}`?)"))
+                .unwrap_or_default();
+            bail!(
+                "{context}: column `{c}` does not exist on table `{target_table}`{suggestion}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Tiny edit-distance suggester. Returns Some(name) if any candidate is
+/// within 2 character edits — enough to catch the common rename misses
+/// (`users` vs `user`, `id` vs `ids`) without false positives.
+fn closest_match<'a>(target: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let mut best: Option<(usize, &'a str)> = None;
+    for c in candidates {
+        let d = edit_distance(target, c);
+        if d <= 2 && best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, c));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (cur[j] + 1)
+                .min(prev[j + 1] + 1)
+                .min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 fn parse_table(s: &ItemStruct) -> Result<Table> {

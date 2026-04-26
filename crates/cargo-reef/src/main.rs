@@ -77,6 +77,7 @@ enum ReefCommand {
     /// `--write <name>`: write the SQL to `migrations/<ts>_<name>.sql` instead
     /// of applying directly — useful for CI / production where you want the
     /// migration to land in version control.
+    /// `--allow-drop`: required to apply diffs that DROP a table or column.
     #[command(name = "db:push")]
     DbPush {
         /// Path to schema.rs.
@@ -92,6 +93,11 @@ enum ReefCommand {
         /// Print the diff preview and exit without applying or writing.
         #[arg(long)]
         dry_run: bool,
+        /// Required to apply diffs that DROP a table or column. Without
+        /// this, the diff still PREVIEWS drops but refuses to apply them
+        /// — protects against schema-renaming accidents nuking data.
+        #[arg(long)]
+        allow_drop: bool,
     },
 
     /// Parse a `schema.rs` file and print the IR as JSON. Hidden — used to
@@ -165,7 +171,8 @@ fn main() -> ExitCode {
             yes,
             write,
             dry_run,
-        } => block_on(db_push(&schema, yes, write.as_deref(), dry_run)),
+            allow_drop,
+        } => block_on(db_push(&schema, yes, write.as_deref(), dry_run, allow_drop)),
     };
 
     match result {
@@ -798,6 +805,7 @@ async fn db_push(
     yes: bool,
     write: Option<&str>,
     dry_run: bool,
+    allow_drop: bool,
 ) -> Result<()> {
     let cfg = read_config()?.storage;
     let db_path = resolve_db_path(&cfg);
@@ -832,6 +840,18 @@ async fn db_push(
         .iter()
         .any(|a| matches!(a, schema::Action::NeedsRebuild { .. }));
 
+    let drops: Vec<String> = diff
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            schema::Action::DropTable(t) => Some(format!("DROP TABLE {t}")),
+            schema::Action::DropColumn { table, column } => {
+                Some(format!("DROP COLUMN {table}.{column}"))
+            }
+            _ => None,
+        })
+        .collect();
+
     let appliable: Vec<String> = diff
         .actions
         .iter()
@@ -851,6 +871,18 @@ async fn db_push(
             }
         }
         return Ok(());
+    }
+
+    // Drop protection — destructive changes require explicit opt-in. The
+    // preview already showed them; this guard kicks in only at apply time.
+    if !drops.is_empty() && !allow_drop {
+        bail!(
+            "diff contains destructive changes ({}) — re-run with `--allow-drop` \
+             to confirm, or use `--write <name>` to capture the migration without \
+             applying. Most-likely cause: a schema rename that wasn't reflected in \
+             FK references or other tables.",
+            drops.join(", ")
+        );
     }
 
     if let Some(name) = write {

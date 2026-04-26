@@ -1,35 +1,39 @@
-//! Schema — row types for the database.
+//! Schema — single source of truth for the database shape.
 //!
-//! Today these are plain Rust structs that mirror the SQL schema. The SQL
-//! lives in `migrations/<timestamp>_<name>.sql`; this file is the typed
-//! Rust view of those tables, used by `queries::*` and `actions::*`.
+//! Each `#[reef::table]` struct declares a SQL table. The struct fields are
+//! the columns; the Rust types map directly to SQL types (`String` → TEXT
+//! NOT NULL, `Option<i64>` → INTEGER nullable, etc.). The same struct is
+//! also the row type used by `queries::*` and `actions::*`.
 //!
-//! ## v0.5 destination
+//! ## Workflow
 //!
-//! In v0.5, this file becomes the **single source of truth** for the schema.
-//! The plan is a Drizzle-style flow:
+//! - **First-time setup**: `cargo reef migrate run` applies the bundled
+//!   SQL bootstrap migration in `migrations/`. This creates the initial
+//!   schema you see here.
+//! - **Ongoing changes**: edit this file, then run `cargo reef db:push` to
+//!   diff against the live DB and apply the changes (Drizzle-style).
+//!   Use `cargo reef db:push --write <name>` to capture the diff as a
+//!   migration file in `migrations/` instead of applying directly — useful
+//!   for production deploys where you want migrations in version control.
 //!
-//! ```rust,ignore
-//! #[reef::table]
-//! pub struct Greeting {
-//!     #[reef::column(primary_key)]
-//!     pub id: i64,
-//!     pub text: String,
-//! }
-//! ```
+//! ## Attribute reference (abbreviated — full list in the cargo-reef repo)
 //!
-//! Then `cargo reef db:push` will:
-//! 1. Read this file, build an in-memory schema description
-//! 2. Compare against the actual DB state
-//! 3. Generate a new SQL migration that closes the diff
-//! 4. Apply it (or write it to `migrations/` for review, depending on flag)
+//! Table-level: `#[reef::table(name = "...", strict, without_rowid)]`
+//! Field-level: `#[column(primary_key, auto_increment, unique, default = ...,
+//!                        check = ..., references = "table(col)",
+//!                        on_delete = "cascade", generated = ...)]`
+//! Struct helpers: `#[index(...)]`, `#[primary_key(columns = [...])]`,
+//!                 `#[foreign_key(...)]`, `#[check(...)]`
 //!
-//! Until then: keep this file in sync with `migrations/*.sql` by hand.
+//! For typed JSON columns: `pub field: reef::Json<MyType>` (TEXT) or
+//!                         `pub field: reef::Jsonb<MyType>` (BLOB, SQLite 3.45+).
 
 use serde::{Deserialize, Serialize};
 
+#[reef::table]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Greeting {
+    #[column(primary_key)]
     pub id: i64,
     pub text: String,
 }

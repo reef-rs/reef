@@ -339,14 +339,18 @@ async fn introspect_indexes(conn: &Connection, table: &str) -> Result<Vec<Index>
         if origin == "pk" || idx_name.starts_with("sqlite_autoindex_") {
             continue;
         }
-        // KNOWN GAP: expression-based indexes (e.g. `json_extract(...)`)
-        // come back with NULL column names from PRAGMA index_info, so
-        // `columns` will be empty for them. Recovering the expression text
-        // requires reading the index's row from sqlite_master and parsing
-        // the column list. Deferred — the diff engine will treat empty
-        // expression indexes as needing recreation when comparing against
-        // a parsed schema, which is acceptable for v0.2.
-        let columns = read_index_columns(conn, &idx_name).await?;
+        // PRAGMA index_info returns NULL for expression positions in an
+        // expression index (e.g. `json_extract(meta, '$.country')`). For those,
+        // fall back to parsing the index's CREATE INDEX text from sqlite_master,
+        // which always carries the original expression list.
+        let mut columns = read_index_columns(conn, &idx_name).await?;
+        let needs_expr_recovery = columns.is_empty()
+            || columns.len() < count_index_arity(conn, &idx_name).await.unwrap_or(0);
+        if needs_expr_recovery {
+            if let Some(expr_cols) = recover_index_columns_from_master(conn, &idx_name).await? {
+                columns = expr_cols;
+            }
+        }
         out.push(Index {
             name: Some(idx_name),
             columns,
@@ -354,6 +358,146 @@ async fn introspect_indexes(conn: &Connection, table: &str) -> Result<Vec<Index>
         });
     }
     Ok(out)
+}
+
+/// PRAGMA index_xinfo gives one row per indexed position (vs index_info which
+/// only emits rows with non-NULL column names). Counting it tells us the
+/// "true" arity so we can detect when index_info underreported due to
+/// expression positions.
+async fn count_index_arity(conn: &Connection, index: &str) -> Result<usize> {
+    let mut rows = conn
+        .query(&format!("PRAGMA index_xinfo({})", quote_pragma(index)), ())
+        .await?;
+    let mut count = 0;
+    while let Some(row) = rows.next().await? {
+        // `key` field (column 5 in xinfo) is 1 for "key" columns, 0 for
+        // included/aux. Count only key columns.
+        let key: i64 = row.get(5).unwrap_or(1);
+        if key == 1 {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Read `sqlite_master.sql` for the index, find the `(...)` after `ON tablename`,
+/// and split the contents on top-level commas (respecting parens + quoted
+/// strings). Returns None if the row is missing or malformed.
+async fn recover_index_columns_from_master(
+    conn: &Connection,
+    index: &str,
+) -> Result<Option<Vec<String>>> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            libsql::params![index.to_string()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let Some(sql): Option<String> = row.get(0).ok() else {
+        return Ok(None);
+    };
+    Ok(parse_index_columns_from_sql(&sql))
+}
+
+/// Extract the column list from `CREATE [UNIQUE] INDEX name ON tbl (a, b, expr(...))`.
+/// Top-level comma split with paren and quote awareness — handles expression
+/// indexes like `json_extract(meta, '$.country')` correctly.
+fn parse_index_columns_from_sql(sql: &str) -> Option<Vec<String>> {
+    // Find the parenthesized column list. Locate `ON <ident> (` and start
+    // there. We walk by index since SQL identifiers are ASCII-friendly here.
+    let lower = sql.to_ascii_lowercase();
+    let on_pos = lower.find(" on ")?;
+    let after_on = &sql[on_pos + 4..];
+    let open_rel = after_on.find('(')?;
+    let body_start = on_pos + 4 + open_rel + 1;
+
+    // Walk to the matching close paren.
+    let bytes = sql.as_bytes();
+    let mut depth = 1i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut end = None;
+    let mut splits: Vec<usize> = Vec::new();
+    for (i, &b) in bytes.iter().enumerate().skip(body_start) {
+        let c = b as char;
+        if in_single {
+            if c == '\'' {
+                // Handle SQL escape '' (doubled quote).
+                if bytes.get(i + 1).copied() == Some(b'\'') {
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            ',' if depth == 1 => splits.push(i),
+            _ => {}
+        }
+    }
+    let end = end?;
+
+    let mut parts = Vec::new();
+    let mut cursor = body_start;
+    for s in splits.iter().chain(std::iter::once(&end)) {
+        let frag = sql[cursor..*s].trim();
+        if !frag.is_empty() {
+            // Strip trailing ASC/DESC and COLLATE clauses if present —
+            // they don't affect "what column expression is being indexed."
+            parts.push(strip_index_modifiers(frag));
+        }
+        cursor = *s + 1;
+    }
+    Some(parts)
+}
+
+fn strip_index_modifiers(s: &str) -> String {
+    // Walk from right; strip ASC/DESC and COLLATE <name> tokens.
+    let mut out = s.trim().to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let trimmed = lower.trim_end();
+        let stripped = trimmed
+            .strip_suffix(" asc")
+            .or_else(|| trimmed.strip_suffix(" desc"));
+        if let Some(new_lower) = stripped {
+            out.truncate(new_lower.len());
+            out = out.trim_end().to_string();
+            continue;
+        }
+        // COLLATE <name> — find " collate " in lowercase, truncate at its position
+        if let Some(pos) = lower.rfind(" collate ") {
+            // Only strip if there's nothing else after the collate clause
+            // (i.e., it's the trailing modifier).
+            let tail = &lower[pos + " collate ".len()..];
+            if tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                out.truncate(pos);
+                out = out.trim_end().to_string();
+                continue;
+            }
+        }
+        break;
+    }
+    out
 }
 
 // ============================================================================

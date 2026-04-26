@@ -31,6 +31,11 @@ tokio = { version = "1", features = ["full"], optional = true }
 libsql = { version = "0.9", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 
+# Reef runtime — schema-as-code attribute (`#[reef::table]`) and Json/Jsonb
+# wrappers, consumed by `cargo reef db:push`. Server-only because schema.rs
+# lives under `src/server/db/`. Pinned to git until reef hits crates.io.
+reef = { git = "https://github.com/reef-rs/cargo-reef", optional = true }
+
 # ---- Web-only (gated by `web` feature) ------------------------------------
 # (none yet for v0.1; e.g. web-sys, wasm-bindgen-futures would go here)
 
@@ -64,6 +69,7 @@ server = [
     "dep:tokio",
     "dep:libsql",
     "dep:tracing-subscriber",
+    "dep:reef",
 ]
 
 # ============================================================================
