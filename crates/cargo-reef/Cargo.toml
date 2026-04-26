@@ -1,0 +1,39 @@
+[package]
+name = "cargo-reef"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "CLI scaffolder + tooling for Reef apps. `cargo reef new my-app` to scaffold; `cargo reef dev` to run; `cargo reef migrate` for DB migrations."
+documentation = "https://docs.rs/cargo-reef"
+readme = "../../README.md"
+keywords = ["cli", "scaffold", "fullstack", "dioxus", "framework"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "cargo-reef"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+console = "0.16"        # styled terminal output
+dialoguer = "0.11"      # interactive prompts (used in v0.2+)
+anyhow.workspace = true
+
+# Scaffolding
+include_dir = "0.7"
+
+# Migrations
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+libsql = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+toml = "0.9"
+serde.workspace = true
+
+# Schema parsing (for `db:push` — v0.2)
+syn.workspace = true
+quote.workspace = true
+serde_json = "1"

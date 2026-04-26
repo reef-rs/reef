@@ -1,0 +1,452 @@
+//! `syn`-based schema.rs parser.
+//!
+//! Reads the file, walks top-level items, picks out structs marked with
+//! `#[reef::table]` (or `#[table]` after `use reef::table`), and turns each
+//! into a [`Table`] in the [`Schema`] IR.
+
+use std::path::Path;
+
+use anyhow::{anyhow, bail, Context, Result};
+use quote::ToTokens;
+use syn::{
+    spanned::Spanned, Attribute, Expr, ExprArray, ExprLit, Field, Item, ItemStruct, Lit, LitStr,
+    Meta,
+};
+
+use super::ir::{
+    Column, ColumnFk, FkAction, Generated, GeneratedKind, Index, Schema, Table, TableCheck,
+    TableForeignKey, TablePrimaryKey,
+};
+use super::types::map_field_type;
+
+pub fn parse_file(path: &Path) -> Result<Schema> {
+    let src = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let file = syn::parse_file(&src)
+        .with_context(|| format!("parsing {} as Rust", path.display()))?;
+
+    let mut tables = Vec::new();
+    for item in &file.items {
+        if let Item::Struct(s) = item {
+            if has_marker(&s.attrs, "table") {
+                let table = parse_table(s).with_context(|| {
+                    format!("parsing struct `{}` as a #[reef::table]", s.ident)
+                })?;
+                tables.push(table);
+            }
+        }
+    }
+
+    Ok(Schema { tables })
+}
+
+fn parse_table(s: &ItemStruct) -> Result<Table> {
+    let rust_name = s.ident.to_string();
+    let mut name = snake_case(&rust_name);
+    let mut strict = false;
+    let mut without_rowid = false;
+
+    // #[reef::table(name = "...", strict, without_rowid)] args
+    for attr in s.attrs.iter().filter(|a| is_marker_attr(a, "table")) {
+        if matches!(attr.meta, Meta::Path(_)) {
+            continue; // bare `#[reef::table]` with no args
+        }
+        attr.parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            match key.as_str() {
+                "name" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    name = v.value();
+                }
+                "strict" => strict = true,
+                "without_rowid" => without_rowid = true,
+                other => return Err(meta.error(format!("unknown table arg `{other}`"))),
+            }
+            Ok(())
+        })?;
+    }
+
+    // Field-level columns
+    let mut columns = Vec::new();
+    let syn::Fields::Named(named) = &s.fields else {
+        bail!("`#[reef::table]` requires a struct with named fields");
+    };
+    for field in &named.named {
+        columns.push(parse_column(field).with_context(|| {
+            format!(
+                "field `{}`",
+                field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default()
+            )
+        })?);
+    }
+    if columns.is_empty() {
+        bail!("`#[reef::table]` requires at least one field");
+    }
+
+    // Struct-level helper attrs
+    let mut primary_key = None;
+    let mut indexes = Vec::new();
+    let mut foreign_keys = Vec::new();
+    let mut checks = Vec::new();
+
+    for attr in &s.attrs {
+        if is_marker_attr(attr, "primary_key") {
+            if primary_key.is_some() {
+                bail!("multiple `#[primary_key(...)]` attributes — only one composite PK is allowed");
+            }
+            primary_key = Some(parse_primary_key(attr)?);
+        } else if is_marker_attr(attr, "index") {
+            indexes.push(parse_index(attr)?);
+        } else if is_marker_attr(attr, "foreign_key") {
+            foreign_keys.push(parse_foreign_key(attr)?);
+        } else if is_marker_attr(attr, "check") {
+            checks.push(parse_check(attr)?);
+        }
+    }
+
+    Ok(Table {
+        name,
+        rust_name,
+        strict,
+        without_rowid,
+        columns,
+        primary_key,
+        indexes,
+        foreign_keys,
+        checks,
+    })
+}
+
+fn parse_column(field: &Field) -> Result<Column> {
+    let name = field
+        .ident
+        .as_ref()
+        .ok_or_else(|| anyhow!("tuple-struct fields are not supported"))?
+        .to_string();
+
+    let info = map_field_type(&field.ty)?;
+
+    let mut col = Column {
+        name,
+        ty: info.column_type,
+        nullable: info.nullable,
+        primary_key: false,
+        auto_increment: false,
+        unique: false,
+        default: None,
+        check: None,
+        references: None,
+        generated: None,
+    };
+
+    let mut on_delete: Option<FkAction> = None;
+    let mut on_update: Option<FkAction> = None;
+    let mut generated_expr: Option<String> = None;
+    let mut generated_kind: Option<GeneratedKind> = None;
+
+    for attr in field.attrs.iter().filter(|a| is_marker_attr(a, "column")) {
+        attr.parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            match key.as_str() {
+                "primary_key" => col.primary_key = true,
+                "auto_increment" => col.auto_increment = true,
+                "unique" => col.unique = true,
+                "default" => {
+                    let v: Expr = meta.value()?.parse()?;
+                    col.default = Some(expr_to_sql_literal(&v));
+                }
+                "check" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    col.check = Some(v.value());
+                }
+                "references" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    let (table, column) = parse_single_fk_target(&v.value())
+                        .map_err(|e| meta.error(e.to_string()))?;
+                    col.references = Some(ColumnFk {
+                        table,
+                        column,
+                        on_delete: None,
+                        on_update: None,
+                    });
+                }
+                "on_delete" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    on_delete = Some(
+                        FkAction::parse(&v.value())
+                            .ok_or_else(|| meta.error("invalid on_delete value"))?,
+                    );
+                }
+                "on_update" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    on_update = Some(
+                        FkAction::parse(&v.value())
+                            .ok_or_else(|| meta.error("invalid on_update value"))?,
+                    );
+                }
+                "generated" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    generated_expr = Some(v.value());
+                }
+                "generated_kind" => {
+                    let v: LitStr = meta.value()?.parse()?;
+                    generated_kind = Some(match v.value().as_str() {
+                        "stored" => GeneratedKind::Stored,
+                        "virtual" => GeneratedKind::Virtual,
+                        _ => return Err(meta.error("generated_kind must be 'stored' or 'virtual'")),
+                    });
+                }
+                other => return Err(meta.error(format!("unknown column key `{other}`"))),
+            }
+            Ok(())
+        })?;
+    }
+
+    if let Some(fk) = col.references.as_mut() {
+        fk.on_delete = on_delete;
+        fk.on_update = on_update;
+    } else if on_delete.is_some() || on_update.is_some() {
+        bail!("on_delete/on_update set without `references`");
+    }
+
+    if let Some(expr) = generated_expr {
+        col.generated = Some(Generated {
+            expr,
+            kind: generated_kind.unwrap_or(GeneratedKind::Virtual),
+        });
+    } else if generated_kind.is_some() {
+        bail!("`generated_kind` set without `generated`");
+    }
+
+    Ok(col)
+}
+
+fn parse_primary_key(attr: &Attribute) -> Result<TablePrimaryKey> {
+    let mut columns = Vec::new();
+    attr.parse_nested_meta(|meta| {
+        match ident_str(&meta.path).as_deref() {
+            Some("columns") => {
+                columns = parse_string_array(&meta.value()?.parse::<Expr>()?)?;
+                Ok(())
+            }
+            _ => Err(meta.error("only `columns = [...]` is allowed")),
+        }
+    })?;
+    if columns.is_empty() {
+        bail!("`#[primary_key]` requires `columns = [...]`");
+    }
+    Ok(TablePrimaryKey { columns })
+}
+
+fn parse_index(attr: &Attribute) -> Result<Index> {
+    let mut name = None;
+    let mut columns = Vec::new();
+    let mut unique = false;
+    attr.parse_nested_meta(|meta| {
+        match ident_str(&meta.path).as_deref() {
+            Some("name") => {
+                let v: LitStr = meta.value()?.parse()?;
+                name = Some(v.value());
+            }
+            Some("columns") => {
+                columns = parse_string_array(&meta.value()?.parse::<Expr>()?)?;
+            }
+            Some("unique") => unique = true,
+            _ => return Err(meta.error("unknown index key")),
+        }
+        Ok(())
+    })?;
+    if columns.is_empty() {
+        bail!("`#[index]` requires `columns = [...]`");
+    }
+    Ok(Index {
+        name,
+        columns,
+        unique,
+    })
+}
+
+fn parse_foreign_key(attr: &Attribute) -> Result<TableForeignKey> {
+    let mut columns = Vec::new();
+    let mut references = String::new();
+    let mut on_delete = None;
+    let mut on_update = None;
+    attr.parse_nested_meta(|meta| {
+        match ident_str(&meta.path).as_deref() {
+            Some("columns") => {
+                columns = parse_string_array(&meta.value()?.parse::<Expr>()?)?;
+            }
+            Some("references") => {
+                let v: LitStr = meta.value()?.parse()?;
+                references = v.value();
+            }
+            Some("on_delete") => {
+                let v: LitStr = meta.value()?.parse()?;
+                on_delete = Some(
+                    FkAction::parse(&v.value())
+                        .ok_or_else(|| meta.error("invalid on_delete"))?,
+                );
+            }
+            Some("on_update") => {
+                let v: LitStr = meta.value()?.parse()?;
+                on_update = Some(
+                    FkAction::parse(&v.value())
+                        .ok_or_else(|| meta.error("invalid on_update"))?,
+                );
+            }
+            _ => return Err(meta.error("unknown foreign_key key")),
+        }
+        Ok(())
+    })?;
+    if columns.is_empty() {
+        bail!("`#[foreign_key]` requires `columns = [...]`");
+    }
+    if references.is_empty() {
+        bail!("`#[foreign_key]` requires `references = \"table(c1, c2)\"`");
+    }
+    let (references_table, references_columns) = parse_composite_fk_target(&references)?;
+    if references_columns.len() != columns.len() {
+        bail!(
+            "foreign_key column count mismatch: {} local, {} referenced",
+            columns.len(),
+            references_columns.len()
+        );
+    }
+    Ok(TableForeignKey {
+        columns,
+        references_table,
+        references_columns,
+        on_delete,
+        on_update,
+    })
+}
+
+fn parse_check(attr: &Attribute) -> Result<TableCheck> {
+    let mut name = String::new();
+    let mut expr = String::new();
+    attr.parse_nested_meta(|meta| {
+        match ident_str(&meta.path).as_deref() {
+            Some("name") => {
+                let v: LitStr = meta.value()?.parse()?;
+                name = v.value();
+            }
+            Some("expr") => {
+                let v: LitStr = meta.value()?.parse()?;
+                expr = v.value();
+            }
+            _ => return Err(meta.error("unknown check key")),
+        }
+        Ok(())
+    })?;
+    if name.is_empty() || expr.is_empty() {
+        bail!("`#[check]` requires both `name` and `expr`");
+    }
+    Ok(TableCheck { name, expr })
+}
+
+// ============================================================================
+//  small helpers
+// ============================================================================
+
+fn has_marker(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| is_marker_attr(a, name))
+}
+
+/// Match `#[<name>...]`, `#[reef::<name>...]`. Match by last path segment.
+fn is_marker_attr(attr: &Attribute, name: &str) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == name)
+}
+
+fn ident_str(p: &syn::Path) -> Option<String> {
+    p.get_ident().map(|i| i.to_string())
+}
+
+fn parse_string_array(expr: &Expr) -> syn::Result<Vec<String>> {
+    let Expr::Array(ExprArray { elems, .. }) = expr else {
+        return Err(syn::Error::new(expr.span(), "expected `[...]` array"));
+    };
+    elems
+        .iter()
+        .map(|e| match e {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) => Ok(s.value()),
+            _ => Err(syn::Error::new(e.span(), "expected a string literal")),
+        })
+        .collect()
+}
+
+/// Parse `"users(id)"` → `("users", "id")`.
+fn parse_single_fk_target(s: &str) -> Result<(String, String)> {
+    let (table, rest) = s
+        .split_once('(')
+        .ok_or_else(|| anyhow!("references must be `table(column)`, got `{s}`"))?;
+    let column = rest
+        .strip_suffix(')')
+        .ok_or_else(|| anyhow!("references missing closing `)`"))?;
+    let cols: Vec<&str> = column.split(',').map(str::trim).collect();
+    if cols.len() != 1 {
+        bail!("single-column FK on a column may only reference one column; use `#[foreign_key(...)]` for composite FKs");
+    }
+    Ok((table.trim().to_string(), cols[0].to_string()))
+}
+
+/// Parse `"users(id, tenant_id)"` → `("users", vec!["id", "tenant_id"])`.
+fn parse_composite_fk_target(s: &str) -> Result<(String, Vec<String>)> {
+    let (table, rest) = s
+        .split_once('(')
+        .ok_or_else(|| anyhow!("references must be `table(c1, c2)`, got `{s}`"))?;
+    let cols = rest
+        .strip_suffix(')')
+        .ok_or_else(|| anyhow!("references missing closing `)`"))?;
+    let columns: Vec<String> = cols.split(',').map(|c| c.trim().to_string()).collect();
+    Ok((table.trim().to_string(), columns))
+}
+
+/// Render any expr as a SQL literal. String literals lose their Rust quotes
+/// and become SQL `'...'` literals; numeric/bool/other exprs render as-is.
+fn expr_to_sql_literal(e: &Expr) -> String {
+    if let Expr::Lit(ExprLit {
+        lit: Lit::Str(s), ..
+    }) = e
+    {
+        format!("'{}'", s.value().replace('\'', "''"))
+    } else {
+        expr_string(e)
+    }
+}
+
+fn expr_string(e: &Expr) -> String {
+    e.to_token_stream().to_string()
+}
+
+fn snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    // Pluralize naively — a struct named `User` becomes table `users`.
+    // This matches Drizzle's convention but we can revisit if it surprises.
+    if !out.ends_with('s') {
+        out.push('s');
+    }
+    out
+}
