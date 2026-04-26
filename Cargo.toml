@@ -12,7 +12,7 @@ members = [
 # from the published cargo-reef .crate (breaking `cargo reef new`).
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 # Points at the post-rename URL (reef-rs/cargo-reef → reef-rs/reef). GitHub

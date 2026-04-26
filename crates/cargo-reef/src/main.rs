@@ -347,10 +347,13 @@ fn init_git(target: &Path) {
 //  cargo reef dev
 // ============================================================================
 
+/// Range probed for an available dev port when the user doesn't specify one.
+/// 21 ports is plenty — if the user has 8080-8100 all in use, they have
+/// something specific going on and should pass `--port` explicitly.
+const DEV_PORT_RANGE: std::ops::RangeInclusive<u16> = 8080..=8100;
+
 fn run_dev(extra: &[String]) -> Result<()> {
     print_banner();
-    println!("{}", style("Starting dev loop (dx serve --web --interactive false)…").dim());
-    println!();
 
     // Verify dx is installed before we exec — friendlier error than a "not found" trap
     let dx_check = std::process::Command::new("dx").arg("--version").output();
@@ -362,29 +365,59 @@ fn run_dev(extra: &[String]) -> Result<()> {
         );
     }
 
-    // Disable dx's interactive TUI dashboard. dx 0.7's TUI mode has a bug on
-    // macOS arm64 (and possibly elsewhere) where the process gets SIGKILLed
-    // after running for a few minutes. Bisected by reproducing with bare
-    // `dx serve --web` (TUI on, dies) vs `dx serve --web --interactive false`
-    // (TUI off, stable indefinitely). Same `--web` build path either way; the
-    // only difference is dx's terminal ownership / dashboard rendering.
+    // Resolve the port: explicit `--port N` in extras wins, otherwise
+    // probe 8080..=8100 for the first available, otherwise bail with a
+    // clear message + workaround.
+    let user_port: Option<u16> = extra
+        .windows(2)
+        .find_map(|w| (w[0] == "--port").then(|| w[1].parse().ok()).flatten());
+    let port = match user_port {
+        Some(p) => p,
+        None => match find_free_port() {
+            Some(p) => p,
+            None => bail!(
+                "all ports {start}-{end} are in use. \
+                 Pick one explicitly: `cargo reef dev -- --port <PORT>`",
+                start = DEV_PORT_RANGE.start(),
+                end = DEV_PORT_RANGE.end(),
+            ),
+        },
+    };
+
+    println!("{}", style("Starting dev loop (dx serve --web --interactive false)…").dim());
+    println!(
+        "{} {}",
+        style("Server will be live at").dim(),
+        style(format!("http://127.0.0.1:{port}")).bold().cyan()
+    );
+    println!();
+
+    // Disable dx's interactive TUI dashboard. dx 0.7's TUI mode has a bug
+    // where the process gets SIGKILLed after running for a few minutes
+    // (reproducible on macOS arm64; not yet tested elsewhere). Bisected by
+    // running `dx serve --web` (TUI on, dies) vs `dx serve --web
+    // --interactive false` (TUI off, stable indefinitely). Same `--web`
+    // build path either way; only difference is dx's terminal handling.
     //
-    // Cost: users lose the interactive shortcuts (`r` rebuild, `p` pause,
-    // etc.). Trade is worth it — those shortcuts are nice-to-haves, but a
-    // dev server that randomly dies every 5-30 minutes isn't.
+    // Cost: users lose the dashboard's keyboard shortcuts (`r` rebuild,
+    // `p` pause, etc.). Worth it — those are nice-to-haves; a dev server
+    // that randomly dies isn't.
     //
-    // If/when dx fixes the TUI issue upstream, drop `--interactive false`
-    // and let dx default back to its dashboard.
-    //
-    // Users who explicitly want the dashboard back can pass it themselves:
-    //   cargo reef dev -- --interactive
+    // Users can override: `cargo reef dev -- --interactive`
     let user_set_interactive = extra
         .iter()
         .any(|a| a == "--interactive" || a == "-i" || a.starts_with("--interactive="));
+
     let mut args: Vec<String> = vec!["serve".into(), "--web".into()];
     if !user_set_interactive {
         args.push("--interactive".into());
         args.push("false".into());
+    }
+    // If the user already passed --port, keep their value; otherwise inject
+    // our autopicked one.
+    if user_port.is_none() {
+        args.push("--port".into());
+        args.push(port.to_string());
     }
     args.extend(extra.iter().cloned());
 
@@ -400,6 +433,17 @@ fn run_dev(extra: &[String]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Probe DEV_PORT_RANGE for the first port that accepts a TCP bind.
+/// Tiny race window between the bind-and-drop here and dx's bind moments
+/// later; acceptable for dev — worst case dx errors out clearly and the
+/// user retries.
+fn find_free_port() -> Option<u16> {
+    use std::net::TcpListener;
+    DEV_PORT_RANGE.into_iter().find(|&port| {
+        TcpListener::bind(("127.0.0.1", port)).is_ok()
+    })
 }
 
 // ============================================================================
