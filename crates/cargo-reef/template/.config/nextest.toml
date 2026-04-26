@@ -1,0 +1,10 @@
+[profile.default]
+# Two retries cover transient I/O / network flakes without masking real bugs.
+retries = 2
+
+# Cap parallelism on CI to avoid OOM on small runners.
+# Override with NEXTEST_TEST_THREADS env var locally.
+
+[profile.ci]
+test-threads = "num-cpus"
+fail-fast = false

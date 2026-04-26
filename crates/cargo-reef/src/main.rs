@@ -1,0 +1,1203 @@
+//! `cargo-reef` — CLI scaffolder + tooling for Reef apps.
+//!
+//! Subcommands:
+//!   - `new <name>`               Scaffold a new app from the embedded template
+//!   - `dev`                      Start the dev loop (`dx serve --web` + banner)
+//!   - `migrate run`              Apply pending SQL migrations
+//!   - `migrate new <name>`       Generate a timestamped migration file
+//!   - `migrate status`           Show applied vs pending migrations
+//!   - `migrate revert`           Roll back the last migration (requires *.down.sql)
+//!
+//! Designed in `docs/` — see cli.md, build.md, deploy.md, migrations.md.
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use anyhow::{anyhow, bail, Context, Result};
+use clap::{Parser, Subcommand};
+use console::style;
+use include_dir::{include_dir, Dir, DirEntry};
+use serde::Deserialize;
+
+mod schema;
+
+/// The Reef template — embedded into the binary at compile time. Lives
+/// INSIDE this crate's directory (`crates/cargo-reef/template/`) so that
+/// `cargo publish` packages the template files alongside the source.
+/// Files outside the crate dir get stripped from the .crate package.
+static TEMPLATE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/template");
+
+// ============================================================================
+//  CLI
+// ============================================================================
+
+/// Cargo invokes us as `cargo-reef reef <args>` (cargo prepends the subcommand
+/// name). This wrapper consumes the leading "reef" arg.
+#[derive(Parser)]
+#[command(bin_name = "cargo")]
+enum CargoCli {
+    Reef(ReefArgs),
+}
+
+#[derive(Parser)]
+#[command(
+    name = "reef",
+    about = "Scaffold and manage Reef apps",
+    version,
+    disable_help_subcommand = true
+)]
+struct ReefArgs {
+    #[command(subcommand)]
+    cmd: ReefCommand,
+}
+
+#[derive(Subcommand)]
+enum ReefCommand {
+    /// Scaffold a new Reef app from the embedded template.
+    New {
+        /// Name of the app, or a path (e.g. `my-app`, `../my-app`, `/tmp/test`).
+        name: String,
+    },
+
+    /// Start the dev loop (sugar for `dx serve --web` with a Reef banner).
+    Dev {
+        /// Additional args to pass through to `dx serve`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+
+    /// Database migration commands.
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCommand,
+    },
+
+    /// Diff `src/server/db/schema.rs` against the live database and apply
+    /// the changes (Drizzle-style schema-as-code workflow).
+    ///
+    /// Default: print preview, prompt for confirmation, apply.
+    /// `--features X,Y`: evaluate cfg gates as if X and Y were enabled —
+    ///   pick the schema view matching this build's binary.
+    /// `--write <name>`: write the SQL to `migrations/<ts>_<name>.sql` instead
+    /// of applying directly — useful for CI / production where you want the
+    /// migration to land in version control.
+    /// `--allow-drop`: required to apply diffs that DROP a table or column.
+    #[command(name = "db:push")]
+    DbPush {
+        /// Path to schema.rs.
+        #[arg(long, default_value = "src/server/db/schema.rs")]
+        schema: std::path::PathBuf,
+        /// Active features for cfg evaluation. Determines which
+        /// `#[cfg(feature = "...")]`-gated tables are included. Default:
+        /// all tables, regardless of cfg gates.
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
+        /// Skip the confirmation prompt and apply immediately.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Write the migration to a file instead of applying directly.
+        /// The argument is the snake_case name (e.g. `add_users_table`).
+        #[arg(long, value_name = "NAME")]
+        write: Option<String>,
+        /// Print the diff preview and exit without applying or writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Required to apply diffs that DROP a table or column. Without
+        /// this, the diff still PREVIEWS drops but refuses to apply them
+        /// — protects against schema-renaming accidents nuking data.
+        #[arg(long)]
+        allow_drop: bool,
+    },
+
+    /// Parse a `schema.rs` file and print the IR as JSON. Hidden — used to
+    /// debug the schema-as-code parser before `db:push` lands.
+    #[command(name = "_debug-schema", hide = true)]
+    DebugSchema {
+        /// Path to a `schema.rs` file (defaults to `src/server/db/schema.rs`).
+        #[arg(default_value = "src/server/db/schema.rs")]
+        path: std::path::PathBuf,
+        /// Active features for cfg evaluation. Default: all #[reef::table]
+        /// structs included regardless of cfg.
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
+    },
+
+    /// Parse a `schema.rs` file and print the emitted SQL. Hidden — used to
+    /// eyeball the SQL emitter before `db:push` lands.
+    #[command(name = "_debug-sql", hide = true)]
+    DebugSql {
+        #[arg(default_value = "src/server/db/schema.rs")]
+        path: std::path::PathBuf,
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
+    },
+
+    /// Introspect a live SQLite/libSQL database and print the IR as JSON.
+    /// Hidden — used to eyeball the introspector before `db:push` lands.
+    #[command(name = "_debug-introspect", hide = true)]
+    DebugIntrospect {
+        /// Path to the SQLite database file.
+        #[arg(default_value = "./data/reef.db")]
+        db: std::path::PathBuf,
+    },
+
+    /// Diff a schema.rs against a live database and preview the changes.
+    /// Hidden — preview of what `db:push` will do once it lands.
+    #[command(name = "_debug-diff", hide = true)]
+    DebugDiff {
+        #[arg(long, default_value = "src/server/db/schema.rs")]
+        schema: std::path::PathBuf,
+        #[arg(long, default_value = "./data/reef.db")]
+        db: std::path::PathBuf,
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Apply all pending migrations.
+    Run,
+    /// Generate a new migration file in `migrations/`.
+    New {
+        /// Short snake_case name describing the migration (e.g. `add_users_table`).
+        name: String,
+        /// Also generate a paired `<ts>_<name>.down.sql` rollback skeleton.
+        #[arg(long)]
+        with_down: bool,
+    },
+    /// Show applied vs pending migrations.
+    Status,
+    /// Roll back the last applied migration (requires `*.down.sql`).
+    Revert,
+}
+
+fn main() -> ExitCode {
+    let CargoCli::Reef(args) = CargoCli::parse();
+
+    let result = match args.cmd {
+        ReefCommand::New { name } => scaffold_new(&name),
+        ReefCommand::Dev { extra } => run_dev(&extra),
+        ReefCommand::Migrate { cmd } => run_migrate(cmd),
+        ReefCommand::DebugSchema { path, features } => {
+            debug_schema(&path, &feature_set(features))
+        }
+        ReefCommand::DebugSql { path, features } => debug_sql(&path, &feature_set(features)),
+        ReefCommand::DebugIntrospect { db } => block_on(debug_introspect(&db)),
+        ReefCommand::DebugDiff {
+            schema,
+            db,
+            features,
+        } => block_on(debug_diff(&schema, &db, &feature_set(features))),
+        ReefCommand::DbPush {
+            schema,
+            features,
+            yes,
+            write,
+            dry_run,
+            allow_drop,
+        } => block_on(db_push(
+            &schema,
+            &feature_set(features),
+            yes,
+            write.as_deref(),
+            dry_run,
+            allow_drop,
+        )),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{} {:#}", style("error:").red().bold(), e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ============================================================================
+//  cargo reef new
+// ============================================================================
+
+fn scaffold_new(input: &str) -> Result<()> {
+    let target = PathBuf::from(input);
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("could not derive a project name from `{input}`"))?;
+
+    validate_name(name)?;
+
+    if target.exists() {
+        bail!(
+            "directory `{}` already exists — pick a different name or remove it",
+            target.display()
+        );
+    }
+
+    print_banner();
+
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("creating directory `{}`", target.display()))?;
+
+    let mut count = 0;
+    walk_template(&TEMPLATE, &target, name, &mut count)?;
+
+    init_git(&target);
+
+    println!();
+    println!(
+        "{} Generated {} files in {} ({})",
+        style("✓").green().bold(),
+        count,
+        style(input).bold(),
+        style(format!("package: {name}")).dim()
+    );
+    println!();
+    println!("Next steps:");
+    println!();
+    println!("  {} {}", style("$").dim(), style(format!("cd {input}")).bold());
+    println!("  {} {}", style("$").dim(), style("cargo reef migrate run").bold());
+    println!("  {} {}", style("$").dim(), style("cargo reef dev").bold());
+    println!();
+    println!("Learn more at {}", style("https://reef.rs").underlined().cyan());
+    println!();
+
+    Ok(())
+}
+
+fn walk_template(dir: &Dir, target: &Path, project_name: &str, count: &mut usize) -> Result<()> {
+    for entry in dir.entries() {
+        match entry {
+            DirEntry::Dir(d) => {
+                let dst = target.join(d.path());
+                std::fs::create_dir_all(&dst).with_context(|| format!("mkdir {}", dst.display()))?;
+                walk_template(d, target, project_name, count)?;
+            }
+            DirEntry::File(f) => {
+                // Strip the `.in` suffix used to dodge Cargo's "this is a
+                // sub-crate" detection during `cargo publish`. Source files
+                // like `Cargo.toml.in` get scaffolded out as `Cargo.toml`.
+                let dst_path = strip_template_suffix(f.path());
+                let dst = target.join(dst_path);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("mkdir {}", parent.display()))?;
+                }
+                let bytes = if let Some(text) = f.contents_utf8() {
+                    substitute(text, project_name).into_bytes()
+                } else {
+                    f.contents().to_vec()
+                };
+                std::fs::write(&dst, bytes).with_context(|| format!("write {}", dst.display()))?;
+                *count += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Source files whose name ends in `.in` get scaffolded out without that
+/// suffix. We use this so files like `template/Cargo.toml.in` (which would
+/// otherwise make Cargo treat `template/` as a sub-crate and strip it from
+/// the published `cargo-reef` .crate) live happily inside the package source.
+fn strip_template_suffix(p: &Path) -> PathBuf {
+    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+        if let Some(stripped) = name.strip_suffix(".in") {
+            if let Some(parent) = p.parent() {
+                return parent.join(stripped);
+            }
+        }
+    }
+    p.to_path_buf()
+}
+
+fn substitute(text: &str, project_name: &str) -> String {
+    text.replace("reef-template", project_name)
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("project name cannot be empty");
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() {
+        bail!("project name must start with a letter, got `{name}`");
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            bail!(
+                "project name `{name}` contains invalid character `{c}` (use letters, digits, _, -)"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn init_git(target: &Path) {
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(target)
+        .status();
+}
+
+// ============================================================================
+//  cargo reef dev
+// ============================================================================
+
+fn run_dev(extra: &[String]) -> Result<()> {
+    print_banner();
+    println!("{}", style("Starting dev loop (dx serve --web --verbose)…").dim());
+    println!(
+        "{}",
+        style("First-time compile takes 5-10 min (libsql + WASM + 268 deps from scratch). \
+               Subsequent runs are fast.")
+            .dim()
+    );
+    println!(
+        "{} {}",
+        style("Server will be live at").dim(),
+        style("http://127.0.0.1:8080").bold().cyan()
+    );
+    println!();
+
+    // Verify dx is installed before we exec — friendlier error than a "not found" trap
+    let dx_check = std::process::Command::new("dx").arg("--version").output();
+    if dx_check.is_err() {
+        bail!(
+            "dx (Dioxus CLI) not found in PATH. Install with:\n\n  \
+             cargo install dioxus-cli\n\n\
+             then retry `cargo reef dev`."
+        );
+    }
+
+    // Pass `--verbose` to dx so cargo's compile output streams through.
+    // Without this, dx is silent for the entire 5-10min cold compile and
+    // users (reasonably) think it's hung. The user can override by passing
+    // their own verbosity flag in `extra` — clap dedup is up to dx.
+    let user_set_verbosity = extra
+        .iter()
+        .any(|a| matches!(a.as_str(), "--verbose" | "--trace" | "--quiet" | "-q"));
+    let mut args: Vec<String> = Vec::with_capacity(extra.len() + 1);
+    if !user_set_verbosity {
+        args.push("--verbose".into());
+    }
+    args.extend(extra.iter().cloned());
+
+    spawn_dx_with_cleanup(&args)
+}
+
+/// Spawn `dx serve` with shutdown semantics that propagate to its subprocess
+/// tree. dx itself spawns several long-lived children (the WASM compiler, the
+/// server binary, hot-reload watchers); without active cleanup, Ctrl-C in the
+/// terminal can leave them as orphans (we've seen ~4-hour-old `dx serve`
+/// processes accumulate this way).
+///
+/// Strategy: put dx into its own process group, then on SIGINT/SIGTERM/SIGHUP
+/// kill the whole group via `kill(-pgid)`. dx and every descendant get the
+/// signal at once.
+#[cfg(unix)]
+fn spawn_dx_with_cleanup(extra: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Arc;
+
+    let mut child = std::process::Command::new("dx")
+        .arg("serve")
+        .arg("--web")
+        .args(extra)
+        // process_group(0) puts the child in a new group with itself as
+        // leader, so dx's own descendants inherit that PGID.
+        .process_group(0)
+        .spawn()
+        .context("launching dx serve")?;
+
+    let pgid = Arc::new(AtomicI32::new(child.id() as i32));
+    let pgid_for_handler = pgid.clone();
+    // ctrlc handler runs on SIGINT, SIGTERM, and (on unix) SIGHUP. It only
+    // gets installed once per process — set_handler errors on a second call,
+    // which we ignore since the second binary call won't happen in practice.
+    let _ = ctrlc::set_handler(move || {
+        let pid = pgid_for_handler.load(Ordering::SeqCst);
+        if pid > 0 {
+            // Negate the PID to target the entire process group. SIGTERM gives
+            // dx a chance to flush; if it ignores us, the parent process exit
+            // below sends SIGHUP to anything still attached to the terminal.
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+        }
+    });
+
+    let status = child.wait().context("waiting on dx serve")?;
+    // Best-effort: even on a clean exit, sweep the group in case dx left
+    // anything behind. Errors are expected and ignored (no such process).
+    let pid = pgid.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+    }
+
+    if !status.success() {
+        bail!("dx serve exited with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn spawn_dx_with_cleanup(extra: &[String]) -> Result<()> {
+    // Windows path: rely on the OS's default Ctrl-C semantics. Job objects
+    // would give equivalent cleanup but we don't ship a Windows build today.
+    let status = std::process::Command::new("dx")
+        .arg("serve")
+        .arg("--web")
+        .args(extra)
+        .status()
+        .context("launching dx serve")?;
+    if !status.success() {
+        bail!("dx serve exited with status {status}");
+    }
+    Ok(())
+}
+
+// ============================================================================
+//  cargo reef migrate
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct ReefConfig {
+    storage: StorageConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageConfig {
+    #[serde(default = "default_db_url_env")]
+    db_url_env: String,
+    #[serde(default = "default_db_path")]
+    db_path_default: String,
+    #[serde(default = "default_migrations_dir")]
+    migrations_dir: String,
+}
+
+fn default_db_url_env() -> String {
+    "DATABASE_URL".to_string()
+}
+fn default_db_path() -> String {
+    "./data/reef.db".to_string()
+}
+fn default_migrations_dir() -> String {
+    "migrations".to_string()
+}
+
+fn read_config() -> Result<ReefConfig> {
+    let path = Path::new(".reef/config.toml");
+    if !path.exists() {
+        bail!(
+            "no .reef/config.toml found in {}. \
+             Run this from a Reef project root (or scaffold one with `cargo reef new`).",
+            std::env::current_dir().unwrap_or_default().display()
+        );
+    }
+    let text = std::fs::read_to_string(path).context("reading .reef/config.toml")?;
+    let cfg: ReefConfig = toml::from_str(&text).context("parsing .reef/config.toml")?;
+    Ok(cfg)
+}
+
+fn resolve_db_path(cfg: &StorageConfig) -> String {
+    std::env::var(&cfg.db_url_env).unwrap_or_else(|_| cfg.db_path_default.clone())
+}
+
+fn run_migrate(cmd: MigrateCommand) -> Result<()> {
+    let cfg = read_config()?.storage;
+
+    match cmd {
+        MigrateCommand::Run => block_on(migrate_run(&cfg)),
+        MigrateCommand::New { name, with_down } => migrate_new(&cfg, &name, with_down),
+        MigrateCommand::Status => block_on(migrate_status(&cfg)),
+        MigrateCommand::Revert => block_on(migrate_revert(&cfg)),
+    }
+}
+
+fn block_on<F: std::future::Future<Output = Result<()>>>(fut: F) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?
+        .block_on(fut)
+}
+
+/// Discover all `*.sql` files in `migrations/` (excluding `*.down.sql`),
+/// sorted lexicographically by filename. Each entry is `(name, path)` where
+/// `name` is the file stem (e.g. `20260425_120000_init`).
+fn discover_forward_migrations(migrations_dir: &str) -> Result<Vec<(String, PathBuf)>> {
+    let dir = Path::new(migrations_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for e in std::fs::read_dir(dir).with_context(|| format!("reading {migrations_dir}"))? {
+        let e = e?;
+        let path = e.path();
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !name.ends_with(".sql") {
+            continue;
+        }
+        // Skip down-only files
+        if name.ends_with(".down.sql") {
+            continue;
+        }
+        let stem = name.trim_end_matches(".sql").to_string();
+        entries.push((stem, path));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
+
+async fn open_db(path: &str) -> Result<libsql::Connection> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+    }
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .context("opening libSQL database")?;
+    let conn = db.connect().context("connecting to libSQL database")?;
+
+    // Bootstrap the migration tracking table on first use.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            duration_ms INTEGER,
+            checksum TEXT
+        )",
+        (),
+    )
+    .await
+    .context("creating schema_migrations table")?;
+
+    Ok(conn)
+}
+
+async fn applied_migrations(conn: &libsql::Connection) -> Result<std::collections::HashMap<String, Option<String>>> {
+    let mut rows = conn
+        .query("SELECT name, checksum FROM schema_migrations", ())
+        .await
+        .context("querying schema_migrations")?;
+    let mut map = std::collections::HashMap::new();
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(0)?;
+        let checksum: Option<String> = row.get(1).ok();
+        map.insert(name, checksum);
+    }
+    Ok(map)
+}
+
+fn checksum(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    // Cheap, dependency-free hash. Not cryptographic — purely for "did this
+    // file change after being applied" detection.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+async fn migrate_run(cfg: &StorageConfig) -> Result<()> {
+    let db_path = resolve_db_path(cfg);
+    println!("{} {}", style("Database:       ").dim(), style(&db_path).bold());
+    println!(
+        "{} {}",
+        style("Migrations dir: ").dim(),
+        style(&cfg.migrations_dir).bold()
+    );
+    println!();
+
+    let conn = open_db(&db_path).await?;
+    let applied = applied_migrations(&conn).await?;
+    let files = discover_forward_migrations(&cfg.migrations_dir)?;
+
+    let mut applied_count = 0;
+    let mut warned = false;
+    for (name, path) in &files {
+        let sql = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        let sum = checksum(sql.as_bytes());
+
+        match applied.get(name) {
+            Some(prev) => {
+                // Already applied — warn if the file has been edited since
+                if let Some(p) = prev {
+                    if p != &sum {
+                        eprintln!(
+                            "  {} {} (checksum mismatch — file was edited after being applied)",
+                            style("⚠").yellow().bold(),
+                            style(name).bold()
+                        );
+                        warned = true;
+                    }
+                }
+                continue;
+            }
+            None => {
+                let started = std::time::Instant::now();
+                conn.execute_batch(&sql)
+                    .await
+                    .with_context(|| format!("applying {name}"))?;
+                let duration_ms = started.elapsed().as_millis() as i64;
+                conn.execute(
+                    "INSERT INTO schema_migrations (name, duration_ms, checksum) VALUES (?1, ?2, ?3)",
+                    libsql::params![name.clone(), duration_ms, sum],
+                )
+                .await
+                .with_context(|| format!("recording {name}"))?;
+
+                println!(
+                    "  {} {} {}",
+                    style("✓").green().bold(),
+                    style(name).bold(),
+                    style(format!("({}ms)", duration_ms)).dim()
+                );
+                applied_count += 1;
+            }
+        }
+    }
+
+    println!();
+    if applied_count == 0 {
+        println!("{} (already up to date)", style("Nothing to do").dim());
+    } else {
+        println!(
+            "{} Applied {} migration{}",
+            style("✓").green().bold(),
+            applied_count,
+            if applied_count == 1 { "" } else { "s" }
+        );
+    }
+    if warned {
+        println!();
+        println!(
+            "{} See checksum warnings above. Edited migrations after being applied is risky — \
+             prefer rolling forward with a new migration.",
+            style("Note:").yellow().bold()
+        );
+    }
+    Ok(())
+}
+
+fn migrate_new(cfg: &StorageConfig, name: &str, with_down: bool) -> Result<()> {
+    validate_migration_name(name)?;
+
+    let dir = Path::new(&cfg.migrations_dir);
+    std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+    let stem = format!("{timestamp}_{name}");
+
+    let forward_path = dir.join(format!("{stem}.sql"));
+    let forward_template = format!(
+        "-- Migration: {name}\n\
+         -- Generated: {generated}\n\
+         -- Forward — applied by `cargo reef migrate run`\n\n\
+         -- Your CREATE/ALTER/DROP statements here.\n",
+        name = name,
+        generated = now.format("%Y-%m-%dT%H:%M:%SZ")
+    );
+    std::fs::write(&forward_path, forward_template)
+        .with_context(|| format!("writing {}", forward_path.display()))?;
+
+    println!(
+        "{} {}",
+        style("✓").green().bold(),
+        style(forward_path.display().to_string()).bold()
+    );
+
+    if with_down {
+        let down_path = dir.join(format!("{stem}.down.sql"));
+        let down_template = format!(
+            "-- Rollback for: {name}\n\
+             -- Generated: {generated}\n\
+             -- Applied by `cargo reef migrate revert`\n\n\
+             -- Statements that undo the forward migration.\n",
+            name = name,
+            generated = now.format("%Y-%m-%dT%H:%M:%SZ")
+        );
+        std::fs::write(&down_path, down_template)
+            .with_context(|| format!("writing {}", down_path.display()))?;
+        println!(
+            "{} {}",
+            style("✓").green().bold(),
+            style(down_path.display().to_string()).bold()
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_migration_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("migration name cannot be empty");
+    }
+    for c in name.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            bail!(
+                "migration name `{name}` contains invalid character `{c}` \
+                 (use letters, digits, underscores)"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_status(cfg: &StorageConfig) -> Result<()> {
+    let db_path = resolve_db_path(cfg);
+    let conn = open_db(&db_path).await?;
+    let applied = applied_migrations(&conn).await?;
+    let files = discover_forward_migrations(&cfg.migrations_dir)?;
+
+    println!();
+    println!(
+        "{} {} ({} migration{} known)",
+        style("Database:").dim(),
+        style(&db_path).bold(),
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
+    println!();
+
+    if files.is_empty() {
+        println!("{} no migrations in `{}`", style("ℹ").cyan(), &cfg.migrations_dir);
+        return Ok(());
+    }
+
+    let pending: Vec<&(String, PathBuf)> =
+        files.iter().filter(|(n, _)| !applied.contains_key(n)).collect();
+    let applied_files: Vec<&(String, PathBuf)> =
+        files.iter().filter(|(n, _)| applied.contains_key(n)).collect();
+
+    if !applied_files.is_empty() {
+        println!("{}", style("Applied:").bold());
+        for (name, _) in applied_files {
+            println!("  {} {}", style("✓").green(), name);
+        }
+        println!();
+    }
+
+    if !pending.is_empty() {
+        println!("{}", style("Pending:").bold());
+        for (name, _) in pending {
+            println!("  {} {}", style("→").yellow(), name);
+        }
+        println!();
+        println!(
+            "Run {} to apply.",
+            style("cargo reef migrate run").bold()
+        );
+    } else {
+        println!("{} all caught up", style("✓").green().bold());
+    }
+
+    Ok(())
+}
+
+async fn migrate_revert(cfg: &StorageConfig) -> Result<()> {
+    let db_path = resolve_db_path(cfg);
+    let conn = open_db(&db_path).await?;
+
+    // Find the most recent applied migration. Drop the row stream before
+    // doing anything else — libsql holds a read lock on schema_migrations
+    // until the stream is dropped, which would deadlock the DELETE below.
+    let last = {
+        let mut rows = conn
+            .query(
+                "SELECT name FROM schema_migrations ORDER BY applied_at DESC, name DESC LIMIT 1",
+                (),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => row.get::<String>(0)?,
+            None => {
+                println!("{} nothing to revert (no applied migrations)", style("ℹ").cyan());
+                return Ok(());
+            }
+        }
+    };
+
+    let down_path = Path::new(&cfg.migrations_dir).join(format!("{last}.down.sql"));
+    if !down_path.exists() {
+        bail!(
+            "no rollback file `{}` for `{}`. \
+             Roll forward with a new corrective migration instead, \
+             or write a `.down.sql` and re-run.",
+            down_path.display(),
+            last
+        );
+    }
+
+    let sql = tokio::fs::read_to_string(&down_path)
+        .await
+        .with_context(|| format!("reading {}", down_path.display()))?;
+
+    println!("{} {}", style("Reverting:").bold(), style(&last).bold());
+    let started = std::time::Instant::now();
+    conn.execute_batch(&sql)
+        .await
+        .with_context(|| format!("applying rollback for {last}"))?;
+    conn.execute(
+        "DELETE FROM schema_migrations WHERE name = ?1",
+        libsql::params![last.clone()],
+    )
+    .await
+    .context("removing migration record")?;
+
+    println!(
+        "  {} done {}",
+        style("✓").green().bold(),
+        style(format!("({}ms)", started.elapsed().as_millis())).dim()
+    );
+    Ok(())
+}
+
+// ============================================================================
+//  Output styling
+// ============================================================================
+
+/// Random sea/reef-themed status messages shown by every top-level command.
+/// One is picked per invocation, weighted equally — gives Reef a bit of
+/// personality without commit to a single tagline.
+const BANNERS: &[&str] = &[
+    // 🦀 crab
+    "🦀  Scuttling…",
+    "🦀  Skittering…",
+    "🦀  Crabwalking…",
+    "🦀  Sidestepping…",
+    "🦀  Pinching…",
+    "🦀  Molting…",
+    // 🪸 coral
+    "🪸  Branching out…",
+    "🪸  Calcifying…",
+    "🪸  Anchoring…",
+    "🪸  Reefing in…",
+    // 🐚 shell
+    "🐚  Shelling…",
+    "🐚  Spiraling…",
+    "🐚  Pearling…",
+    // 🫧 bubble
+    "🫧  Bubbling up…",
+    "🫧  Frothing…",
+    "🫧  Effervescing…",
+    // 🌊 wave
+    "🌊  Cresting…",
+    "🌊  Surfing in…",
+    // 🐙🪼🐠🐡🦐🤿 misc sea life
+    "🐙  Tentacling…",
+    "🪼  Drifting…",
+    "🐠  Darting…",
+    "🐟  Schooling…",
+    "🐡  Puffing up…",
+    "🦐  Shrimping…",
+    "🤿  Diving in…",
+    // The classic — keeps the original feel as a rare callback
+    "🦀  Welcome to the Reef.",
+];
+
+fn print_banner() {
+    // Hash the current time (full nanos since epoch + process id) and modulo.
+    // Direct `nanos % BANNERS.len()` aliases badly — calls a fraction of a
+    // second apart land in the same bucket because the time delta is divisible
+    // by small numbers. Hashing scrambles the bits so consecutive calls spread
+    // across the table evenly. Cheap, no `rand` dep.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut h);
+    std::process::id().hash(&mut h);
+    let idx = (h.finish() as usize) % BANNERS.len();
+    println!();
+    println!("{}", style(BANNERS[idx]).bold().cyan());
+    println!();
+}
+
+// ============================================================================
+//  cargo reef _debug-schema
+// ============================================================================
+
+/// Build a `FeatureSet` from a CLI flag value. Empty vec → Unconstrained
+/// (include every #[reef::table] regardless of cfg) which preserves
+/// backward compat for projects that don't gate their schema.
+fn feature_set(features: Vec<String>) -> schema::FeatureSet {
+    if features.is_empty() {
+        schema::FeatureSet::unconstrained()
+    } else {
+        schema::FeatureSet::from_features(features)
+    }
+}
+
+fn debug_schema(path: &std::path::Path, features: &schema::FeatureSet) -> Result<()> {
+    let schema = schema::parse_file(path, features)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
+    println!("{json}");
+    Ok(())
+}
+
+fn debug_sql(path: &std::path::Path, features: &schema::FeatureSet) -> Result<()> {
+    let schema = schema::parse_file(path, features)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let stmts = schema::emit_schema(&schema);
+    println!("{}", stmts.join("\n\n"));
+    Ok(())
+}
+
+async fn debug_introspect(db_path: &std::path::Path) -> Result<()> {
+    if !db_path.exists() {
+        bail!("database file not found: {}", db_path.display());
+    }
+    let db = libsql::Builder::new_local(db_path)
+        .build()
+        .await
+        .context("opening libSQL database")?;
+    let conn = db.connect().context("connecting to libSQL database")?;
+    let schema = schema::introspect_db(&conn).await?;
+    let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
+    println!("{json}");
+    Ok(())
+}
+
+async fn debug_diff(
+    schema_path: &std::path::Path,
+    db_path: &std::path::Path,
+    features: &schema::FeatureSet,
+) -> Result<()> {
+    let desired = schema::parse_file(schema_path, features)
+        .with_context(|| format!("parsing {}", schema_path.display()))?;
+
+    let actual = if db_path.exists() {
+        let db = libsql::Builder::new_local(db_path)
+            .build()
+            .await
+            .context("opening libSQL database")?;
+        let conn = db.connect().context("connecting to libSQL database")?;
+        schema::introspect_db(&conn).await?
+    } else {
+        // No DB yet — diff against an empty schema, so everything reads as
+        // CREATE TABLE actions.
+        schema::Schema { tables: Vec::new() }
+    };
+
+    let diff = schema::diff(&desired, &actual);
+    println!("{}", schema::render_diff(&diff));
+    Ok(())
+}
+
+// ============================================================================
+//  cargo reef db:push
+// ============================================================================
+
+async fn db_push(
+    schema_path: &std::path::Path,
+    features: &schema::FeatureSet,
+    yes: bool,
+    write: Option<&str>,
+    dry_run: bool,
+    allow_drop: bool,
+) -> Result<()> {
+    let cfg = read_config()?.storage;
+    let db_path = resolve_db_path(&cfg);
+
+    let desired = schema::parse_file(schema_path, features)
+        .with_context(|| format!("parsing {}", schema_path.display()))?;
+    let actual = if std::path::Path::new(&db_path).exists() {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .context("opening libSQL database")?;
+        let conn = db.connect().context("connecting to libSQL database")?;
+        schema::introspect_db(&conn).await?
+    } else {
+        schema::Schema { tables: Vec::new() }
+    };
+
+    let diff = schema::diff(&desired, &actual);
+
+    println!(
+        "{} {} {} {}",
+        style("schema:").dim(),
+        style(schema_path.display()).bold(),
+        style("→ db:").dim(),
+        style(&db_path).bold()
+    );
+    println!();
+    println!("{}", schema::render_diff(&diff));
+
+    let needs_rebuild = diff
+        .actions
+        .iter()
+        .any(|a| matches!(a, schema::Action::NeedsRebuild { .. }));
+
+    let drops: Vec<String> = diff
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            schema::Action::DropTable(t) => Some(format!("DROP TABLE {t}")),
+            schema::Action::DropColumn { table, column } => {
+                Some(format!("DROP COLUMN {table}.{column}"))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let appliable: Vec<String> = diff
+        .actions
+        .iter()
+        .filter_map(schema::emit_action)
+        .collect();
+
+    if appliable.is_empty() && !needs_rebuild {
+        return Ok(());
+    }
+
+    if dry_run {
+        if !appliable.is_empty() {
+            println!();
+            println!("{}", style("SQL that would be applied:").bold());
+            for sql in &appliable {
+                println!("  {}", style(sql).dim());
+            }
+        }
+        return Ok(());
+    }
+
+    // Drop protection — destructive changes require explicit opt-in. The
+    // preview already showed them; this guard kicks in only at apply time.
+    if !drops.is_empty() && !allow_drop {
+        bail!(
+            "diff contains destructive changes ({}) — re-run with `--allow-drop` \
+             to confirm, or use `--write <name>` to capture the migration without \
+             applying. Most-likely cause: a schema rename that wasn't reflected in \
+             FK references or other tables.",
+            drops.join(", ")
+        );
+    }
+
+    if let Some(name) = write {
+        return write_migration(&cfg.migrations_dir, name, &appliable, needs_rebuild);
+    }
+
+    if appliable.is_empty() {
+        // Only NeedsRebuild items — nothing we can apply automatically.
+        bail!("only manual migrations are required (see above) — re-run with `cargo reef migrate new <name>`");
+    }
+
+    if !yes && needs_rebuild {
+        // Refuse silent partial application — the user should explicitly opt in.
+        bail!(
+            "the diff contains both auto-appliable changes AND manual migrations. \
+             Re-run with `--write <name>` to capture the auto changes as a migration \
+             file, then write the manual parts by hand."
+        );
+    }
+
+    if !yes {
+        let prompt = format!(
+            "Apply {} change{} to {}?",
+            appliable.len(),
+            if appliable.len() == 1 { "" } else { "s" },
+            db_path
+        );
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .context("reading confirmation")?;
+        if !confirmed {
+            println!("{} aborted", style("✗").red());
+            return Ok(());
+        }
+    }
+
+    apply_sql(&db_path, &appliable).await?;
+    println!(
+        "{} applied {} statement{}",
+        style("✓").green().bold(),
+        appliable.len(),
+        if appliable.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+async fn apply_sql(db_path: &str, statements: &[String]) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(db_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+    }
+    let db = libsql::Builder::new_local(db_path)
+        .build()
+        .await
+        .context("opening libSQL database")?;
+    let conn = db.connect().context("connecting to libSQL database")?;
+    for stmt in statements {
+        conn.execute_batch(stmt)
+            .await
+            .with_context(|| format!("applying:\n  {stmt}"))?;
+    }
+    Ok(())
+}
+
+fn write_migration(
+    migrations_dir: &str,
+    name: &str,
+    statements: &[String],
+    needs_rebuild: bool,
+) -> Result<()> {
+    let dir = std::path::Path::new(migrations_dir);
+    std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+
+    let now = chrono::Utc::now();
+    let stem = format!("{}_{}", now.format("%Y%m%d_%H%M%S"), name);
+    let path = dir.join(format!("{stem}.sql"));
+
+    let mut body = String::new();
+    body.push_str(&format!(
+        "-- Migration: {name}\n-- Generated by `cargo reef db:push --write {name}` at {}\n\n",
+        now.format("%Y-%m-%dT%H:%M:%SZ")
+    ));
+    if needs_rebuild {
+        body.push_str(
+            "-- NOTE: The diff also flagged manual migration items (see CLI output).\n\
+             -- Add the corresponding hand-written statements to this file.\n\n",
+        );
+    }
+    for stmt in statements {
+        body.push_str(stmt);
+        body.push_str("\n\n");
+    }
+
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "{} {}",
+        style("✓").green().bold(),
+        style(path.display().to_string()).bold()
+    );
+    if needs_rebuild {
+        println!(
+            "{} edit the file to add manual migration statements before running \
+             `cargo reef migrate run`.",
+            style("note:").yellow().bold()
+        );
+    }
+    Ok(())
+}

@@ -1,0 +1,144 @@
+/* Reef brand styles. Tailwind output goes to assets/tailwind.css.
+   This file holds non-tailwind global CSS — variables, fonts, custom selectors. */
+
+:root {
+  --reef-coral: #E15C3C;
+  --reef-teal: #5BA89A;
+  --reef-teal-soft: #A8DDD0;
+  --reef-teal-glow: rgba(91, 168, 154, 0.45);
+  --reef-online: #22c55e;
+  --reef-online-glow: rgba(34, 197, 94, 0.6);
+  --reef-bg: #111E24;
+  --reef-fg: #E8F4F1;
+  --reef-mute: #8AA1AA;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #main { height: 100%; }
+body {
+  background: var(--reef-bg);
+  color: var(--reef-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.splash { min-height: 100vh; display: grid; place-items: center; padding: 2rem; }
+.splash-card { max-width: 560px; text-align: center; }
+
+/* ─── Logo + ambient bubble animation ───────────────────────────── */
+
+/* Wrap is INTENTIONALLY larger than the logo so:
+   1. The drop-shadow glow can extend past the image bounds (no `overflow:
+      hidden` — the shadow follows the PNG's alpha channel, not a rectangle).
+   2. Bubbles have visible breathing room around the logo. The logo image
+      is opaque-where-painted; if the wrap is the same size as the logo,
+      bubbles behind it (z-index 0) get fully covered. */
+.splash-logo-wrap {
+  position: relative;
+  width: 320px;
+  height: 280px;
+  margin: 0 auto 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.splash-logo {
+  position: relative;
+  z-index: 1;
+  width: 200px;
+  height: auto;
+  display: block;
+  /* Soft teal glow under the logo. The pulse keyframe makes the glow gently
+     breathe — slow enough to be ambient, not distracting. drop-shadow follows
+     the PNG's alpha (round-ish), unlike box-shadow which is rectangular. */
+  filter: drop-shadow(0 0 18px var(--reef-teal-glow));
+  animation: logo-glow 4s ease-in-out infinite;
+}
+
+@keyframes logo-glow {
+  0%, 100% { filter: drop-shadow(0 0 14px var(--reef-teal-glow)); }
+  50%      { filter: drop-shadow(0 0 28px var(--reef-teal-glow)); }
+}
+
+.bubble {
+  position: absolute;
+  bottom: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,
+              rgba(168, 221, 208, 0.7),
+              rgba(91, 168, 154, 0.25) 60%,
+              transparent 78%);
+  pointer-events: none;
+  z-index: 0;
+  animation: bubble-rise 6s linear infinite;
+  opacity: 0;
+}
+/* Positioned in the margins flanking the logo (logo takes the center ~62%
+   of the 320px wrap; bubbles drift up the spaces on either side). */
+.bubble-1 { left:  6%; width: 10px; height: 10px; animation-delay: 0s;   animation-duration: 7s; }
+.bubble-2 { left: 88%; width:  6px; height:  6px; animation-delay: 1.4s; animation-duration: 5.5s; }
+.bubble-3 { left: 12%; width: 14px; height: 14px; animation-delay: 2.8s; animation-duration: 8s; }
+.bubble-4 { left: 82%; width:  8px; height:  8px; animation-delay: 4.2s; animation-duration: 6.5s; }
+
+@keyframes bubble-rise {
+  0%   { transform: translateY(0)      scale(0.6); opacity: 0; }
+  15%  {                                            opacity: 0.85; }
+  85%  {                                            opacity: 0.45; }
+  100% { transform: translateY(-260px) scale(1.1); opacity: 0; }
+}
+
+/* ─── Heading + body copy ───────────────────────────────────────── */
+
+.splash-title { font-size: 2.25rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.75rem; }
+.splash-tagline { color: var(--reef-mute); margin-bottom: 2rem; line-height: 1.6; }
+.splash-tagline em { color: var(--reef-teal-soft); font-style: normal; font-weight: 600; }
+
+/* ─── Status pill ───────────────────────────────────────────────── */
+
+.splash-status {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem; border: 1px solid #1f3540; border-radius: 999px;
+  background: rgba(255,255,255,0.02); font-size: 0.9rem;
+  color: var(--reef-teal-soft); margin-bottom: 2rem;
+}
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--reef-mute);
+  position: relative;
+  flex-shrink: 0;
+}
+/* Online: bright green, soft pulsing halo via ::after for the pulse ring */
+.status-ok {
+  background: var(--reef-online);
+  box-shadow: 0 0 6px var(--reef-online-glow);
+}
+.status-ok::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--reef-online);
+  animation: dot-pulse 2s ease-out infinite;
+}
+@keyframes dot-pulse {
+  0%   { transform: scale(0.8); opacity: 0.7; }
+  100% { transform: scale(2);   opacity: 0; }
+}
+.status-err { background: var(--reef-coral); box-shadow: 0 0 6px rgba(225, 92, 60, 0.6); }
+
+/* ─── Footer links ──────────────────────────────────────────────── */
+
+.splash-links { display: flex; justify-content: center; gap: 1.5rem; font-size: 0.9rem; }
+.splash-links a { color: var(--reef-teal-soft); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.15s; }
+.splash-links a:hover { border-bottom-color: var(--reef-teal-soft); }
+
+/* ─── Reduced motion: respect user pref ─────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-logo, .bubble, .status-ok::after { animation: none; }
+  .splash-logo { filter: drop-shadow(0 0 18px var(--reef-teal-glow)); }
+  .bubble { display: none; }
+}

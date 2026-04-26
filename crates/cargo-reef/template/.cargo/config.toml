@@ -1,0 +1,7 @@
+# Cargo workspace config.
+# Build flags, target aliases, etc.
+
+[alias]
+# `cargo dev` → equivalent to `dx serve` (the canonical Reef dev loop).
+# Uncomment once dx is required tooling for everyone on the team.
+# dev = "run --package backend-server"

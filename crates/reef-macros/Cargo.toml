@@ -1,0 +1,18 @@
+[package]
+name = "reef-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Proc-macro implementations for the `reef` crate. Marker attributes used by `cargo reef db:push` for schema-as-code."
+readme = "../../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

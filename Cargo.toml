@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cargo-reef",
+    "crates/reef",
+    "crates/reef-macros",
+]
+# Template self-excludes via its own `[workspace]` block (see
+# crates/cargo-reef/template/Cargo.toml). No `exclude` needed here — and
+# we MUST NOT add one, because workspace.exclude propagates into
+# cargo-package's file-stripping rules and would drop template files
+# from the published cargo-reef .crate (breaking `cargo reef new`).
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+# Points at the post-rename URL (reef-rs/cargo-reef → reef-rs/reef). GitHub
+# auto-redirects in either direction, so this resolves correctly even before
+# the rename happens.
+repository = "https://github.com/reef-rs/reef"
+homepage = "https://reef.rs"
+authors = ["Matt Drulia"]
+
+[workspace.dependencies]
+# Workspace-internal crates — kept in lockstep
+reef-macros = { version = "0.2.0", path = "crates/reef-macros" }
+
+# Shared external deps
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

@@ -1,0 +1,27 @@
+[package]
+# crates.io name. The unhyphenated `reef` is taken by an unrelated package
+# (lou-parslow's command-runner crate); the framework publishes as `reef-rs`,
+# matching the `reef-rs` GitHub org. Users add `reef-rs = "0.2"` to their
+# Cargo.toml.
+name = "reef-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Reef framework runtime — schema-as-code marker attributes (`#[reef::table]`) and Json/Jsonb wrappers."
+documentation = "https://docs.rs/reef-rs"
+readme = "../../README.md"
+keywords = ["fullstack", "dioxus", "libsql", "framework"]
+categories = ["development-tools", "web-programming"]
+
+[lib]
+# Decouple the import path from the crates.io package name. Users write
+# `use reef::table;` regardless of how the crate is named on crates.io.
+name = "reef"
+path = "src/lib.rs"
+
+[dependencies]
+reef-macros.workspace = true
+serde.workspace = true

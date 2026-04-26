@@ -1,0 +1,104 @@
+# Reef Template
+
+The starter scaffold `cargo reef new` generates.
+
+A pure-Rust full-stack app: Dioxus frontend (WASM), libSQL embedded database, server functions wired up via dioxus-fullstack. One ~30 MB binary, every environment.
+
+## Run
+
+```bash
+dx serve --web
+```
+
+Open http://localhost:8080. You should see the splash with a green dot ("Server: Reef is running").
+
+> The `--web` flag tells dx to build the WASM client + auto-spawn the server. Without it, dx falls back to the platform set in `Dioxus.toml` (`default_platform = "web"` here, so plain `dx serve` works too).
+>
+> **Don't** pass `--features server` to dx. Features are global — passing it forces `dioxus/server` onto the WASM build and breaks compilation. Let dx handle features per target automatically.
+
+## Migrations
+
+Migrations are managed by the framework, not your project. Apply them with:
+
+```bash
+cargo reef migrate run     # apply pending migrations
+cargo reef migrate new <n> # generate a new migration file
+cargo reef migrate status  # show applied vs pending
+```
+
+Until `cargo-reef` is built, apply manually:
+
+```bash
+mkdir -p data
+for f in migrations/*.sql; do sqlite3 ./data/reef.db < "$f"; done
+```
+
+## Layout
+
+```
+.
+├── .reef/                 # Reef project config (config.toml) + cache (gitignored)
+├── .config/               # nextest config
+├── .cargo/                # cargo aliases
+├── .github/workflows/     # CI
+├── migrations/            # SQL migration files. Bootstrap your DB with
+│                          # `cargo reef migrate run`; for ongoing changes
+│                          # use `cargo reef db:push` (Drizzle-style).
+└── src/
+    ├── protocol/          # shared wire types — frontend + backend depend on this
+    ├── frontend/
+    │   └── web/           # pure UI components (Dioxus, library crate)
+    └── backend/
+        ├── server/        # the dioxus-fullstack entry — main.rs lives here
+        │   ├── public/    # served raw at / (favicon, robots.txt, etc.)
+        │   └── assets/    # bundled by manganis (logo, CSS — referenced via asset!())
+        └── storage/       # libSQL setup, schema, queries/actions
+            └── src/
+                ├── lib.rs       # re-exports + crate-level docs
+                ├── db/
+                │   ├── mod.rs   # Db struct + default_db() global
+                │   └── schema.rs# `#[reef::table]` row types — SSOT for the DB
+                ├── queries.rs   # reads — all SELECTs go through here
+                └── actions.rs   # writes — all INSERT/UPDATE/DELETE through here
+```
+
+## Stack
+
+- **[Dioxus 0.7](https://dioxuslabs.com)** — UI runtime, fullstack RPC
+- **[libSQL](https://turso.tech)** — embedded SQLite with replication primitives
+- **[Tokio](https://tokio.rs)** — async runtime (server)
+- **[Serde](https://serde.rs)** — types over the wire
+- **[Tracing](https://tokio.rs/#tk-lib-tracing)** — structured logging
+
+## Common commands
+
+```bash
+dx serve                          # dev loop
+cargo check --workspace           # quick type-check across all crates
+cargo nextest run --workspace     # run all tests
+cargo reef migrate run            # apply migrations (TODO: cargo-reef in development)
+cargo reef migrate new <name>     # generate a new migration file (TODO)
+cargo reef migrate status         # show applied vs pending (TODO)
+```
+
+## What to do next
+
+- Edit `src/frontend/web/src/components/splash.rs` to customize the UI
+- Add server fns in `src/backend/server/src/api/`
+- Add row types in `src/backend/storage/src/db/schema.rs`
+- Add queries to `queries.rs`, mutations to `actions.rs`
+- Add migrations to `migrations/`
+- Update `.reef/config.toml` if your project shape changes
+
+## Roadmap
+
+| Shipped (v0.2) | Planned |
+|---|---|
+| `#[reef::table]` schema-as-code SSOT, `cargo reef db:push`, hand-written migrations still supported | `cargo reef build` / `deploy` orchestrators (~v0.3) |
+| `default_db()` lazy global (canonical Dioxus "Lazy" pattern) | Same — opt into `axum::Extension` + macro `state:` extractor for per-fn explicit deps |
+| `cargo reef migrate run / new / status / revert` | `db:reset`, `db:seed`, `cargo reef doctor` |
+| `--features X,Y` for cfg-aware multi-deployment schemas | Auto-detect features from active build |
+
+## License
+
+MIT OR Apache-2.0

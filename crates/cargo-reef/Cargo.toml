@@ -1,0 +1,51 @@
+[package]
+name = "cargo-reef"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "CLI scaffolder + tooling for Reef apps. `cargo reef new my-app` to scaffold; `cargo reef dev` to run; `cargo reef migrate` for DB migrations."
+documentation = "https://docs.rs/cargo-reef"
+readme = "../../README.md"
+keywords = ["cli", "scaffold", "fullstack", "dioxus", "framework"]
+categories = ["command-line-utilities", "development-tools"]
+
+# `template/` lives inside this crate dir so `include_dir!("$CARGO_MANIFEST_DIR/template")`
+# can embed it AND `cargo publish` packages it alongside src. The template's
+# Cargo.toml is named `Cargo.toml.in` in source so Cargo doesn't detect the dir
+# as a sub-crate (which would strip it from the .crate). The scaffolder
+# renames `.in` → no extension during `cargo reef new`.
+
+[[bin]]
+name = "cargo-reef"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+console = "0.16"        # styled terminal output
+dialoguer = "0.11"      # interactive prompts (used in v0.2+)
+ctrlc = "3"             # cross-platform SIGINT/SIGTERM/SIGHUP handler — used by `dev`
+                        # to clean up the dx child + its subprocesses on shutdown
+anyhow.workspace = true
+
+# Unix-only: kill(2) on the dx process group during shutdown
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Scaffolding
+include_dir = "0.7"
+
+# Migrations
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+libsql = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+toml = "0.9"
+serde.workspace = true
+
+# Schema parsing (for `db:push` — v0.2)
+syn.workspace = true
+quote.workspace = true
+serde_json = "1"

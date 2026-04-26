@@ -1,0 +1,55 @@
+# Reef project configuration. Used by `cargo reef *` commands.
+# Committed to git — describes the shape of this project.
+#
+# This file is the project METADATA layer. It does NOT control compilation
+# (that's `Cargo.toml`'s `[features]`). Instead, it tells Reef's CLI what
+# kind of project this is so commands like `cargo reef build`, `cargo reef
+# migrate`, and `cargo reef deploy` know what to do.
+
+[project]
+name = "reef-template"
+kind = "cloud"           # cloud | thick-client | hybrid | edge | mobile
+version = "0.1.0"
+
+[auth]
+provider = "none"        # none | local | oidc | tailnet
+
+[storage]
+backend = "libsql"       # libsql | postgres | none
+db_url_env = "DATABASE_URL"
+db_path_default = "./data/reef.db"
+migrations_dir = "migrations"
+
+[deploy]
+target = "none"          # fly | cloudflare | nixos | none
+
+[edge]
+# (only populated when kind includes "edge")
+# headscale_url_env = "HEADSCALE_URL"
+# acl_file = "infra/headscale-acl.hujson"
+
+# ============================================================================
+#  [build] — controls `cargo reef build` orchestration (v0.5)
+# ============================================================================
+#
+# `cargo reef build` (planned for v0.5) reads this section to know which
+# targets to compile, then invokes Cargo with the right `--features` flags
+# from Cargo.toml. One command, all configured targets.
+#
+# Until v0.5, run targets directly:
+#   - `dx serve`               — dev loop (web + server)
+#   - `cargo build --release`  — production native server
+#   - `cargo build --target wasm32-unknown-unknown --features web`  — WASM bundle
+
+[build]
+targets = ["web", "server"]      # what `cargo reef build` produces by default
+optional_targets = []            # opt-in via `cargo reef build --target=desktop`
+
+[build.tailwind]
+enabled = true
+input = "tailwind.css"
+output = "assets/tailwind.css"
+
+[build.assets]
+optimize_images = false          # v0.5: image optimization in build pipeline
+hash_for_cache_busting = true    # manganis already does this
