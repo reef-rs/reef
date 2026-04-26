@@ -8,9 +8,46 @@
 //! trailing semicolons, no terminating newline. Statements come back as a
 //! `Vec<String>` so callers can join with `\n\n` or apply individually.
 
+use super::diff::Action;
 use super::ir::{
     Column, ColumnFk, Generated, GeneratedKind, Index, Schema, Table, TableForeignKey,
 };
+
+/// Render one [`Action`] as a SQL statement. Returns `None` for
+/// [`Action::NeedsRebuild`] — those require a hand-written migration.
+pub fn emit_action(action: &Action) -> Option<String> {
+    Some(match action {
+        Action::CreateTable(t) => emit_table(t),
+        Action::DropTable(name) => format!("DROP TABLE {};", quote_ident(name)),
+        Action::AddColumn { table, column } => {
+            format!(
+                "ALTER TABLE {} ADD COLUMN {};",
+                quote_ident(table),
+                emit_column(column)
+            )
+        }
+        Action::DropColumn { table, column } => {
+            format!(
+                "ALTER TABLE {} DROP COLUMN {};",
+                quote_ident(table),
+                quote_ident(column)
+            )
+        }
+        // libSQL extension: ALTER COLUMN <name> TO <new column definition>.
+        // The "TO" form replaces the column's declaration in-place.
+        Action::AlterColumn { table, after, .. } => {
+            format!(
+                "ALTER TABLE {} ALTER COLUMN {} TO {};",
+                quote_ident(table),
+                quote_ident(&after.name),
+                emit_column(after)
+            )
+        }
+        Action::CreateIndex { table, index } => emit_index(table, index),
+        Action::DropIndex { name } => format!("DROP INDEX {};", quote_ident(name)),
+        Action::NeedsRebuild { .. } => return None,
+    })
+}
 
 /// Emit one statement per table + one per index, in dependency-stable order
 /// (tables first by source order, then indexes table-by-table).

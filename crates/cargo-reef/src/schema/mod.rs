@@ -18,8 +18,8 @@ mod parse;
 mod render;
 mod types;
 
-pub use diff::diff;
-pub use emit::emit_schema;
+pub use diff::{diff, Action};
+pub use emit::{emit_action, emit_schema};
 pub use introspect::introspect_db;
 pub use ir::Schema;
 pub use parse::parse_file;

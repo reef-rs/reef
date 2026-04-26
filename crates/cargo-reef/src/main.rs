@@ -70,6 +70,30 @@ enum ReefCommand {
         cmd: MigrateCommand,
     },
 
+    /// Diff `src/server/db/schema.rs` against the live database and apply
+    /// the changes (Drizzle-style schema-as-code workflow).
+    ///
+    /// Default: print preview, prompt for confirmation, apply.
+    /// `--write <name>`: write the SQL to `migrations/<ts>_<name>.sql` instead
+    /// of applying directly — useful for CI / production where you want the
+    /// migration to land in version control.
+    #[command(name = "db:push")]
+    DbPush {
+        /// Path to schema.rs.
+        #[arg(long, default_value = "src/server/db/schema.rs")]
+        schema: std::path::PathBuf,
+        /// Skip the confirmation prompt and apply immediately.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Write the migration to a file instead of applying directly.
+        /// The argument is the snake_case name (e.g. `add_users_table`).
+        #[arg(long, value_name = "NAME")]
+        write: Option<String>,
+        /// Print the diff preview and exit without applying or writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Parse a `schema.rs` file and print the IR as JSON. Hidden — used to
     /// debug the schema-as-code parser before `db:push` lands.
     #[command(name = "_debug-schema", hide = true)]
@@ -136,6 +160,12 @@ fn main() -> ExitCode {
         ReefCommand::DebugSql { path } => debug_sql(&path),
         ReefCommand::DebugIntrospect { db } => block_on(debug_introspect(&db)),
         ReefCommand::DebugDiff { schema, db } => block_on(debug_diff(&schema, &db)),
+        ReefCommand::DbPush {
+            schema,
+            yes,
+            write,
+            dry_run,
+        } => block_on(db_push(&schema, yes, write.as_deref(), dry_run)),
     };
 
     match result {
@@ -756,5 +786,179 @@ async fn debug_diff(schema_path: &std::path::Path, db_path: &std::path::Path) ->
 
     let diff = schema::diff(&desired, &actual);
     println!("{}", schema::render_diff(&diff));
+    Ok(())
+}
+
+// ============================================================================
+//  cargo reef db:push
+// ============================================================================
+
+async fn db_push(
+    schema_path: &std::path::Path,
+    yes: bool,
+    write: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
+    let cfg = read_config()?.storage;
+    let db_path = resolve_db_path(&cfg);
+
+    let desired = schema::parse_file(schema_path)
+        .with_context(|| format!("parsing {}", schema_path.display()))?;
+    let actual = if std::path::Path::new(&db_path).exists() {
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .context("opening libSQL database")?;
+        let conn = db.connect().context("connecting to libSQL database")?;
+        schema::introspect_db(&conn).await?
+    } else {
+        schema::Schema { tables: Vec::new() }
+    };
+
+    let diff = schema::diff(&desired, &actual);
+
+    println!(
+        "{} {} {} {}",
+        style("schema:").dim(),
+        style(schema_path.display()).bold(),
+        style("→ db:").dim(),
+        style(&db_path).bold()
+    );
+    println!();
+    println!("{}", schema::render_diff(&diff));
+
+    let needs_rebuild = diff
+        .actions
+        .iter()
+        .any(|a| matches!(a, schema::Action::NeedsRebuild { .. }));
+
+    let appliable: Vec<String> = diff
+        .actions
+        .iter()
+        .filter_map(schema::emit_action)
+        .collect();
+
+    if appliable.is_empty() && !needs_rebuild {
+        return Ok(());
+    }
+
+    if dry_run {
+        if !appliable.is_empty() {
+            println!();
+            println!("{}", style("SQL that would be applied:").bold());
+            for sql in &appliable {
+                println!("  {}", style(sql).dim());
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(name) = write {
+        return write_migration(&cfg.migrations_dir, name, &appliable, needs_rebuild);
+    }
+
+    if appliable.is_empty() {
+        // Only NeedsRebuild items — nothing we can apply automatically.
+        bail!("only manual migrations are required (see above) — re-run with `cargo reef migrate new <name>`");
+    }
+
+    if !yes && needs_rebuild {
+        // Refuse silent partial application — the user should explicitly opt in.
+        bail!(
+            "the diff contains both auto-appliable changes AND manual migrations. \
+             Re-run with `--write <name>` to capture the auto changes as a migration \
+             file, then write the manual parts by hand."
+        );
+    }
+
+    if !yes {
+        let prompt = format!(
+            "Apply {} change{} to {}?",
+            appliable.len(),
+            if appliable.len() == 1 { "" } else { "s" },
+            db_path
+        );
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .context("reading confirmation")?;
+        if !confirmed {
+            println!("{} aborted", style("✗").red());
+            return Ok(());
+        }
+    }
+
+    apply_sql(&db_path, &appliable).await?;
+    println!(
+        "{} applied {} statement{}",
+        style("✓").green().bold(),
+        appliable.len(),
+        if appliable.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+async fn apply_sql(db_path: &str, statements: &[String]) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(db_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+    }
+    let db = libsql::Builder::new_local(db_path)
+        .build()
+        .await
+        .context("opening libSQL database")?;
+    let conn = db.connect().context("connecting to libSQL database")?;
+    for stmt in statements {
+        conn.execute_batch(stmt)
+            .await
+            .with_context(|| format!("applying:\n  {stmt}"))?;
+    }
+    Ok(())
+}
+
+fn write_migration(
+    migrations_dir: &str,
+    name: &str,
+    statements: &[String],
+    needs_rebuild: bool,
+) -> Result<()> {
+    let dir = std::path::Path::new(migrations_dir);
+    std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+
+    let now = chrono::Utc::now();
+    let stem = format!("{}_{}", now.format("%Y%m%d_%H%M%S"), name);
+    let path = dir.join(format!("{stem}.sql"));
+
+    let mut body = String::new();
+    body.push_str(&format!(
+        "-- Migration: {name}\n-- Generated by `cargo reef db:push --write {name}` at {}\n\n",
+        now.format("%Y-%m-%dT%H:%M:%SZ")
+    ));
+    if needs_rebuild {
+        body.push_str(
+            "-- NOTE: The diff also flagged manual migration items (see CLI output).\n\
+             -- Add the corresponding hand-written statements to this file.\n\n",
+        );
+    }
+    for stmt in statements {
+        body.push_str(stmt);
+        body.push_str("\n\n");
+    }
+
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "{} {}",
+        style("✓").green().bold(),
+        style(path.display().to_string()).bold()
+    );
+    if needs_rebuild {
+        println!(
+            "{} edit the file to add manual migration statements before running \
+             `cargo reef migrate run`.",
+            style("note:").yellow().bold()
+        );
+    }
     Ok(())
 }
