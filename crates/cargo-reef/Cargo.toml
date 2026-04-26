@@ -27,13 +27,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 console = "0.16"        # styled terminal output
 dialoguer = "0.11"      # interactive prompts (used in v0.2+)
-ctrlc = "3"             # cross-platform SIGINT/SIGTERM/SIGHUP handler — used by `dev`
-                        # to clean up the dx child + its subprocesses on shutdown
 anyhow.workspace = true
-
-# Unix-only: kill(2) on the dx process group during shutdown
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # Scaffolding
 include_dir = "0.7"
