@@ -2,7 +2,7 @@
 //!
 //! Module layout:
 //!   - `db`       — connection management (`Db` struct, `default_db()` global)
-//!   - `db::schema` — Rust row types (will become SSOT for schema in v0.5)
+//!   - `db::schema` — `#[reef::table]` row types; SSOT for the DB shape (`cargo reef db:push`)
 //!   - `queries`  — read-side functions (SELECTs)
 //!   - `actions`  — write-side functions (INSERT / UPDATE / DELETE)
 //!

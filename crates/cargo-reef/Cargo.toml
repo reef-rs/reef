@@ -12,6 +12,12 @@ readme = "../../README.md"
 keywords = ["cli", "scaffold", "fullstack", "dioxus", "framework"]
 categories = ["command-line-utilities", "development-tools"]
 
+# `template/` lives inside this crate dir so `include_dir!("$CARGO_MANIFEST_DIR/template")`
+# can embed it AND `cargo publish` packages it alongside src. The template's
+# Cargo.toml is named `Cargo.toml.in` in source so Cargo doesn't detect the dir
+# as a sub-crate (which would strip it from the .crate). The scaffolder
+# renames `.in` → no extension during `cargo reef new`.
+
 [[bin]]
 name = "cargo-reef"
 path = "src/main.rs"

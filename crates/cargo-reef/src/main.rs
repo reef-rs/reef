@@ -21,9 +21,11 @@ use serde::Deserialize;
 
 mod schema;
 
-/// The Reef template — committed at the workspace root in `template/`,
-/// embedded into the binary at compile time. Single source of truth.
-static TEMPLATE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../template");
+/// The Reef template — embedded into the binary at compile time. Lives
+/// INSIDE this crate's directory (`crates/cargo-reef/template/`) so that
+/// `cargo publish` packages the template files alongside the source.
+/// Files outside the crate dir get stripped from the .crate package.
+static TEMPLATE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/template");
 
 // ============================================================================
 //  CLI
@@ -273,7 +275,11 @@ fn walk_template(dir: &Dir, target: &Path, project_name: &str, count: &mut usize
                 walk_template(d, target, project_name, count)?;
             }
             DirEntry::File(f) => {
-                let dst = target.join(f.path());
+                // Strip the `.in` suffix used to dodge Cargo's "this is a
+                // sub-crate" detection during `cargo publish`. Source files
+                // like `Cargo.toml.in` get scaffolded out as `Cargo.toml`.
+                let dst_path = strip_template_suffix(f.path());
+                let dst = target.join(dst_path);
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("mkdir {}", parent.display()))?;
@@ -289,6 +295,21 @@ fn walk_template(dir: &Dir, target: &Path, project_name: &str, count: &mut usize
         }
     }
     Ok(())
+}
+
+/// Source files whose name ends in `.in` get scaffolded out without that
+/// suffix. We use this so files like `template/Cargo.toml.in` (which would
+/// otherwise make Cargo treat `template/` as a sub-crate and strip it from
+/// the published `cargo-reef` .crate) live happily inside the package source.
+fn strip_template_suffix(p: &Path) -> PathBuf {
+    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+        if let Some(stripped) = name.strip_suffix(".in") {
+            if let Some(parent) = p.parent() {
+                return parent.join(stripped);
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 fn substitute(text: &str, project_name: &str) -> String {

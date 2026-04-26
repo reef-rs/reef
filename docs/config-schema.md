@@ -52,7 +52,7 @@ db_url_env = "DATABASE_URL"
 db_path_default = "./data/app.db"
 migrations_dir = "migrations"
 
-# Used by `cargo reef db:push` (v0.5+ schema-as-code)
+# Used by `cargo reef db:push` (schema-as-code, shipped v0.2 — see docs/db-push.md)
 [storage.schema]
 ssot_path = "src/server/db/schema.rs"
 auto_migrate_on_startup = false

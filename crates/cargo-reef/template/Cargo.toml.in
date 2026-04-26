@@ -1,3 +1,8 @@
+# Empty `[workspace]` declares this scaffolded project as its own workspace
+# root. Without it, dropping the project inside another Cargo workspace
+# would absorb it as an unintended member.
+[workspace]
+
 [package]
 name = "reef-template"
 version = "0.1.0"
@@ -35,9 +40,8 @@ tracing-subscriber = { version = "0.3", optional = true }
 # wrappers, consumed by `cargo reef db:push`. Server-only because schema.rs
 # lives under `src/server/db/`. Crates.io name is `reef-rs` (the unhyphenated
 # `reef` was taken by an unrelated package); the `package = "reef-rs"` rename
-# here lets the import path stay `reef::*` in code. Pinned to git until 0.2.0
-# publishes to crates.io.
-reef = { git = "https://github.com/reef-rs/reef", package = "reef-rs", branch = "init-cli", optional = true }
+# here lets the import path stay `reef::*` in code.
+reef = { version = "0.2", package = "reef-rs", optional = true }
 
 # ---- Web-only (gated by `web` feature) ------------------------------------
 # (none yet for v0.1; e.g. web-sys, wasm-bindgen-futures would go here)

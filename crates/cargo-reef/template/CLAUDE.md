@@ -58,7 +58,7 @@ Reach for a separate crate (workspace) only when (a) publishing to crates.io, (b
 ├── .reef/config.toml             # Reef project METADATA — not compile config
 ├── migrations/                   # SQL migration files (cargo reef migrate run)
 ├── assets/                       # asset_dir per Dioxus.toml: copied to out_dir
-│   ├── favicon.png               # served at /favicon.png (direct path)
+│   ├── favicon.png               # referenced via asset!() — content-hashed URL
 │   ├── logo.png                  # referenced via asset!() — gets hashed URL
 │   ├── main.css                  # brand styles, manually written
 │   └── tailwind.css              # Tailwind output (run npx tailwindcss to populate)
@@ -79,7 +79,7 @@ Reach for a separate crate (workspace) only when (a) publishing to crates.io, (b
         ├── mod.rs
         ├── db/
         │   ├── mod.rs            # Db struct (Arc<Database>), default_db() global
-        │   └── schema.rs         # row types (placeholder for v0.5 SSOT)
+        │   └── schema.rs         # `#[reef::table]` row types — SSOT for the DB
         ├── queries.rs            # all reads
         └── actions.rs            # all writes
 ```
@@ -210,15 +210,29 @@ pub async fn timeout() -> Result<(), ServerFnError> { ... }
 ```toml
 [dependencies]
 dioxus = { version = "0.7.6", features = ["fullstack", "router"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
 
 # Server-only — never compiled for WASM
 tokio = { version = "1", features = ["full"], optional = true }
 libsql = { version = "0.9", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+# Reef runtime — `#[reef::table]` macro + Json/Jsonb wrappers. Crates.io
+# package is `reef-rs` (the unhyphenated `reef` was taken by an unrelated
+# crate); the `package = "reef-rs"` rename keeps the import path `reef::*`.
+reef = { version = "0.2", package = "reef-rs", optional = true }
 
 [features]
-default = ["server"]
+default = []                        # MUST be empty — see below
 web = ["dioxus/web"]
-server = ["dioxus/server", "dep:tokio", "dep:libsql"]
+server = [
+    "dioxus/server",
+    "dep:tokio",
+    "dep:libsql",
+    "dep:tracing-subscriber",
+    "dep:reef",
+]
 ```
 
 **Critical: never pass `--features server` to `dx serve`.** Features are global — passing `server` manually applies it to the WASM build too, which re-enables `dioxus/server` and pulls tokio→mio into wasm32 (mio doesn't compile to WASM). Just run `dx serve` (no flags) — dx auto-applies features per target.
@@ -459,11 +473,27 @@ Use this for: in-app references (logos, CSS, fonts referenced by Rust code). Cac
 Files placed in the `asset_dir` (per Dioxus.toml — we use `assets/`) are auto-copied to `out_dir` and served at literal paths.
 
 ```rust
-document::Link { rel: "icon", href: "/favicon.png" }
-// favicon.png lives at assets/favicon.png, served at /favicon.png
+document::Link { rel: "icon", href: "/some-fixed-path.png" }
+// served from assets/some-fixed-path.png at /some-fixed-path.png
 ```
 
-Use this for: things browsers fetch by hard-coded URL — favicon, robots.txt, sitemap.xml, OG images.
+Use this for: things browsers fetch by **a hard-coded URL the page can't influence** — `robots.txt`, `sitemap.xml`. **Favicons are NOT in this category** — see below.
+
+### Favicon: use `asset!()`, not direct path
+
+Favicons go through `asset!()` for cache-busting:
+
+```rust
+const FAVICON: Asset = asset!("/assets/favicon.png");
+document::Link {
+    rel: "icon",
+    r#type: "image/png",
+    sizes: "32x32",
+    href: FAVICON,
+}
+```
+
+Reasons: (1) Chrome aggressively caches favicons by URL — content-hashed URLs defeat that, so a favicon swap takes effect on next page load, not "after the user manually clears cache or restarts the browser." (2) The `type` and `sizes` attributes matter for Chrome to render newer-format icons correctly.
 
 **Don't use `[[web.resource.static]]`** — it's not in the canonical Dioxus.toml schema (despite some old examples showing it). Use `asset_dir` + direct paths.
 
@@ -595,8 +625,8 @@ Don't violate these without explicit reason.
 | Stylesheet location | In `RootLayout` body via `document::Stylesheet { href: ... }` (NOT in pages — pages unmount on navigation) |
 | Tailwind input file | `./tailwind.css` at project root |
 | Tailwind output file | `./assets/tailwind.css` (referenced as `/tailwind.css` if via `[web.resource]`, or via `asset!()` for hashed URL) |
-| Favicon | `./assets/favicon.png`, referenced as `/favicon.png` directly (NOT via asset!()) |
-| Favicon link in head | `document::Link { rel: "icon", href: "/favicon.png" }` |
+| Favicon | `./assets/favicon.png`, referenced via `asset!()` for cache-busting |
+| Favicon link in head | `document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: FAVICON }` |
 | Migration files | `./migrations/<timestamp>_<name>.sql` |
 | Reef config | `.reef/config.toml` (committed; metadata only) |
 

@@ -6,11 +6,12 @@ Working notes for the `cargo-reef` CLI. Not user-facing yet — these capture in
 
 | Component | Status |
 |---|---|
-| `cargo reef new` (scaffolder) | Not built. Will copy `reef-rs/template` (embedded at build time via `include_dir!`). |
-| `cargo reef build` | Not built. Designed below — reads `.reef/config.toml`, drives `dx build` per configured bin. |
-| `cargo reef deploy` | Not built. Designed below — reads `.reef/config.toml` `[deploy]` section, dispatches to target adapter (Fly / Cloudflare / NixOS / etc.). |
-| `cargo reef migrate run/new/status` | Not built. Hand-rolled SQL migration runner against libSQL. |
-| `cargo reef db:push` | Not built. v0.5+ schema-as-code diff generator (Drizzle-style). |
+| `cargo reef new` (scaffolder) | **Shipped v0.2.** Copies `template/` (embedded at build time via `include_dir!`). |
+| `cargo reef dev` | **Shipped v0.2.** Sugar over `dx serve --web`; kills the dx subprocess group on Ctrl-C. |
+| `cargo reef migrate run / new / status / revert` | **Shipped v0.2.** Hand-rolled SQL migration runner against libSQL with checksum drift detection. |
+| `cargo reef db:push` | **Shipped v0.2.** Drizzle-style schema-as-code diff generator. See [`db-push.md`](./db-push.md). |
+| `cargo reef build` | Not built. Designed in [`build.md`](./build.md) — reads `.reef/config.toml`, drives `dx build` per configured bin. |
+| `cargo reef deploy` | Not built. Designed in [`deploy.md`](./deploy.md) — reads `.reef/config.toml` `[deploy]` section, dispatches to target adapter (Fly / Cloudflare / NixOS / etc.). |
 | Build script integration (`build.rs` route gen) | Not built. Library function in `cargo-reef` that user projects' `build.rs` calls. |
 
 ## Documents

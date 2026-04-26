@@ -59,17 +59,25 @@ impl Db {
 
 // ---- Default global Db ----
 //
-// Convenience for server fns that don't want to plumb a `Db` through context.
+// Lazy async-init singleton. This is the canonical "Option 2" pattern from
+// Dioxus's [examples/07-fullstack/server_state.rs] — equivalent in shape to
+// `dioxus::fullstack::Lazy<T>` but using std/tokio primitives directly so we
+// don't pull in a Dioxus-specific wrapper for one global.
+//
 // Tests should construct their own `Db::new(":memory:")` instead of relying
-// on this — that's the whole point of having an explicit struct.
+// on this — that's the whole point of having `Db` be an explicit struct.
+//
+// If you want explicit per-fn dependency declarations (the "Option 4" pattern),
+// declare an `AppState` struct, register it via `axum::Extension` in the
+// dioxus::serve closure, and pull it into server fns with the macro's `state:`
+// parameter:
+//
+//   #[post("/api/foo", db: State<Db>)]
+//   pub async fn foo() -> Result<()> { db.conn()?... }
 
 static DEFAULT_DB: OnceCell<Db> = OnceCell::const_new();
 
 /// Lazily-initialized default `Db` (uses `DATABASE_URL` or `./data/reef.db`).
-///
-/// In v0.5 this will be replaced by a Tower-Sessions–style extractor that
-/// pulls `Db` from request context. For now, this lets server fns get a Db
-/// without explicit plumbing.
 pub async fn default_db() -> Result<&'static Db> {
     DEFAULT_DB
         .get_or_try_init(|| async { Db::from_env().await })
