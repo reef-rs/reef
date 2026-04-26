@@ -10,12 +10,17 @@
 //! `Json<T>` / `Jsonb<T>` wrappers errors with a "wrap in Json<>/Jsonb<>"
 //! suggestion.
 
+mod diff;
 mod emit;
 mod introspect;
 mod ir;
 mod parse;
+mod render;
 mod types;
 
+pub use diff::diff;
 pub use emit::emit_schema;
 pub use introspect::introspect_db;
+pub use ir::Schema;
 pub use parse::parse_file;
+pub use render::render_diff;

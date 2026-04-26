@@ -95,6 +95,16 @@ enum ReefCommand {
         #[arg(default_value = "./data/reef.db")]
         db: std::path::PathBuf,
     },
+
+    /// Diff a schema.rs against a live database and preview the changes.
+    /// Hidden — preview of what `db:push` will do once it lands.
+    #[command(name = "_debug-diff", hide = true)]
+    DebugDiff {
+        #[arg(long, default_value = "src/server/db/schema.rs")]
+        schema: std::path::PathBuf,
+        #[arg(long, default_value = "./data/reef.db")]
+        db: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +135,7 @@ fn main() -> ExitCode {
         ReefCommand::DebugSchema { path } => debug_schema(&path),
         ReefCommand::DebugSql { path } => debug_sql(&path),
         ReefCommand::DebugIntrospect { db } => block_on(debug_introspect(&db)),
+        ReefCommand::DebugDiff { schema, db } => block_on(debug_diff(&schema, &db)),
     };
 
     match result {
@@ -723,5 +734,27 @@ async fn debug_introspect(db_path: &std::path::Path) -> Result<()> {
     let schema = schema::introspect_db(&conn).await?;
     let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
     println!("{json}");
+    Ok(())
+}
+
+async fn debug_diff(schema_path: &std::path::Path, db_path: &std::path::Path) -> Result<()> {
+    let desired = schema::parse_file(schema_path)
+        .with_context(|| format!("parsing {}", schema_path.display()))?;
+
+    let actual = if db_path.exists() {
+        let db = libsql::Builder::new_local(db_path)
+            .build()
+            .await
+            .context("opening libSQL database")?;
+        let conn = db.connect().context("connecting to libSQL database")?;
+        schema::introspect_db(&conn).await?
+    } else {
+        // No DB yet — diff against an empty schema, so everything reads as
+        // CREATE TABLE actions.
+        schema::Schema { tables: Vec::new() }
+    };
+
+    let diff = schema::diff(&desired, &actual);
+    println!("{}", schema::render_diff(&diff));
     Ok(())
 }
