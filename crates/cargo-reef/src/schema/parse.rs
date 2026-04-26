@@ -13,13 +13,14 @@ use syn::{
     Meta,
 };
 
+use super::cfg::{item_is_active, FeatureSet};
 use super::ir::{
     Column, ColumnFk, FkAction, Generated, GeneratedKind, Index, Schema, Table, TableCheck,
     TableForeignKey, TablePrimaryKey,
 };
 use super::types::map_field_type;
 
-pub fn parse_file(path: &Path) -> Result<Schema> {
+pub fn parse_file(path: &Path, features: &FeatureSet) -> Result<Schema> {
     let src = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let file = syn::parse_file(&src)
@@ -28,12 +29,20 @@ pub fn parse_file(path: &Path) -> Result<Schema> {
     let mut tables = Vec::new();
     for item in &file.items {
         if let Item::Struct(s) = item {
-            if has_marker(&s.attrs, "table") {
-                let table = parse_table(s).with_context(|| {
-                    format!("parsing struct `{}` as a #[reef::table]", s.ident)
-                })?;
-                tables.push(table);
+            if !has_marker(&s.attrs, "table") {
+                continue;
             }
+            // Respect cfg-gating so multi-deployment projects (one schema.rs,
+            // different binaries via features) get the right schema view.
+            if !item_is_active(&s.attrs, features).with_context(|| {
+                format!("evaluating cfg on struct `{}`", s.ident)
+            })? {
+                continue;
+            }
+            let table = parse_table(s).with_context(|| {
+                format!("parsing struct `{}` as a #[reef::table]", s.ident)
+            })?;
+            tables.push(table);
         }
     }
 

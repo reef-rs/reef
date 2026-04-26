@@ -10,6 +10,7 @@
 //! `Json<T>` / `Jsonb<T>` wrappers errors with a "wrap in Json<>/Jsonb<>"
 //! suggestion.
 
+mod cfg;
 mod diff;
 mod emit;
 mod introspect;
@@ -18,6 +19,7 @@ mod parse;
 mod render;
 mod types;
 
+pub use cfg::FeatureSet;
 pub use diff::{diff, Action};
 pub use emit::{emit_action, emit_schema};
 pub use introspect::introspect_db;

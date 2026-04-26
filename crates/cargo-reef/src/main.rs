@@ -74,6 +74,8 @@ enum ReefCommand {
     /// the changes (Drizzle-style schema-as-code workflow).
     ///
     /// Default: print preview, prompt for confirmation, apply.
+    /// `--features X,Y`: evaluate cfg gates as if X and Y were enabled —
+    ///   pick the schema view matching this build's binary.
     /// `--write <name>`: write the SQL to `migrations/<ts>_<name>.sql` instead
     /// of applying directly — useful for CI / production where you want the
     /// migration to land in version control.
@@ -83,6 +85,11 @@ enum ReefCommand {
         /// Path to schema.rs.
         #[arg(long, default_value = "src/server/db/schema.rs")]
         schema: std::path::PathBuf,
+        /// Active features for cfg evaluation. Determines which
+        /// `#[cfg(feature = "...")]`-gated tables are included. Default:
+        /// all tables, regardless of cfg gates.
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
         /// Skip the confirmation prompt and apply immediately.
         #[arg(short = 'y', long)]
         yes: bool,
@@ -107,6 +114,10 @@ enum ReefCommand {
         /// Path to a `schema.rs` file (defaults to `src/server/db/schema.rs`).
         #[arg(default_value = "src/server/db/schema.rs")]
         path: std::path::PathBuf,
+        /// Active features for cfg evaluation. Default: all #[reef::table]
+        /// structs included regardless of cfg.
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
     },
 
     /// Parse a `schema.rs` file and print the emitted SQL. Hidden — used to
@@ -115,6 +126,8 @@ enum ReefCommand {
     DebugSql {
         #[arg(default_value = "src/server/db/schema.rs")]
         path: std::path::PathBuf,
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
     },
 
     /// Introspect a live SQLite/libSQL database and print the IR as JSON.
@@ -134,6 +147,8 @@ enum ReefCommand {
         schema: std::path::PathBuf,
         #[arg(long, default_value = "./data/reef.db")]
         db: std::path::PathBuf,
+        #[arg(long, value_delimiter = ',', value_name = "F1,F2,...")]
+        features: Vec<String>,
     },
 }
 
@@ -162,17 +177,31 @@ fn main() -> ExitCode {
         ReefCommand::New { name } => scaffold_new(&name),
         ReefCommand::Dev { extra } => run_dev(&extra),
         ReefCommand::Migrate { cmd } => run_migrate(cmd),
-        ReefCommand::DebugSchema { path } => debug_schema(&path),
-        ReefCommand::DebugSql { path } => debug_sql(&path),
+        ReefCommand::DebugSchema { path, features } => {
+            debug_schema(&path, &feature_set(features))
+        }
+        ReefCommand::DebugSql { path, features } => debug_sql(&path, &feature_set(features)),
         ReefCommand::DebugIntrospect { db } => block_on(debug_introspect(&db)),
-        ReefCommand::DebugDiff { schema, db } => block_on(debug_diff(&schema, &db)),
+        ReefCommand::DebugDiff {
+            schema,
+            db,
+            features,
+        } => block_on(debug_diff(&schema, &db, &feature_set(features))),
         ReefCommand::DbPush {
             schema,
+            features,
             yes,
             write,
             dry_run,
             allow_drop,
-        } => block_on(db_push(&schema, yes, write.as_deref(), dry_run, allow_drop)),
+        } => block_on(db_push(
+            &schema,
+            &feature_set(features),
+            yes,
+            write.as_deref(),
+            dry_run,
+            allow_drop,
+        )),
     };
 
     match result {
@@ -743,16 +772,27 @@ fn print_banner() {
 //  cargo reef _debug-schema
 // ============================================================================
 
-fn debug_schema(path: &std::path::Path) -> Result<()> {
-    let schema = schema::parse_file(path)
+/// Build a `FeatureSet` from a CLI flag value. Empty vec → Unconstrained
+/// (include every #[reef::table] regardless of cfg) which preserves
+/// backward compat for projects that don't gate their schema.
+fn feature_set(features: Vec<String>) -> schema::FeatureSet {
+    if features.is_empty() {
+        schema::FeatureSet::unconstrained()
+    } else {
+        schema::FeatureSet::from_features(features)
+    }
+}
+
+fn debug_schema(path: &std::path::Path, features: &schema::FeatureSet) -> Result<()> {
+    let schema = schema::parse_file(path, features)
         .with_context(|| format!("parsing {}", path.display()))?;
     let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
     println!("{json}");
     Ok(())
 }
 
-fn debug_sql(path: &std::path::Path) -> Result<()> {
-    let schema = schema::parse_file(path)
+fn debug_sql(path: &std::path::Path, features: &schema::FeatureSet) -> Result<()> {
+    let schema = schema::parse_file(path, features)
         .with_context(|| format!("parsing {}", path.display()))?;
     let stmts = schema::emit_schema(&schema);
     println!("{}", stmts.join("\n\n"));
@@ -774,8 +814,12 @@ async fn debug_introspect(db_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn debug_diff(schema_path: &std::path::Path, db_path: &std::path::Path) -> Result<()> {
-    let desired = schema::parse_file(schema_path)
+async fn debug_diff(
+    schema_path: &std::path::Path,
+    db_path: &std::path::Path,
+    features: &schema::FeatureSet,
+) -> Result<()> {
+    let desired = schema::parse_file(schema_path, features)
         .with_context(|| format!("parsing {}", schema_path.display()))?;
 
     let actual = if db_path.exists() {
@@ -802,6 +846,7 @@ async fn debug_diff(schema_path: &std::path::Path, db_path: &std::path::Path) ->
 
 async fn db_push(
     schema_path: &std::path::Path,
+    features: &schema::FeatureSet,
     yes: bool,
     write: Option<&str>,
     dry_run: bool,
@@ -810,7 +855,7 @@ async fn db_push(
     let cfg = read_config()?.storage;
     let db_path = resolve_db_path(&cfg);
 
-    let desired = schema::parse_file(schema_path)
+    let desired = schema::parse_file(schema_path, features)
         .with_context(|| format!("parsing {}", schema_path.display()))?;
     let actual = if std::path::Path::new(&db_path).exists() {
         let db = libsql::Builder::new_local(&db_path)
