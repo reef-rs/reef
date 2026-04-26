@@ -881,8 +881,9 @@ const BANNERS: &[&str] = &[
     "🐙  Tentacling…",
     "🪼  Drifting…",
     "🐠  Darting…",
+    "🐟  Schooling…",
     "🐡  Puffing up…",
-    "🦐  Schooling…",
+    "🦐  Shrimping…",
     "🤿  Diving in…",
     // The classic — keeps the original feel as a rare callback
     "🦀  Welcome to the Reef.",
