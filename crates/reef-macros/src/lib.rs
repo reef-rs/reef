@@ -59,7 +59,11 @@ use syn::{parse_macro_input, spanned::Spanned, Attribute, Fields, ItemStruct};
 ///   at the struct level for composite PKs)
 /// - `auto_increment` — emit `AUTOINCREMENT` (only valid with INTEGER PK)
 /// - `unique`
-/// - `default = <expr>` — literal or SQL expression
+/// - `default = <expr>` — Rust literal. String literals get SQL-quoted
+///   (`default = "active"` → `DEFAULT 'active'`); numerics/bools emit raw.
+/// - `default_sql = "<sql>"` — verbatim SQL passthrough for function calls
+///   like `default_sql = "datetime('now')"` (use this when you need
+///   `DEFAULT (datetime('now'))` rather than a quoted string literal).
 /// - `check = <expr>` — SQL CHECK constraint scoped to this column
 /// - `references = "<table>(<column>)"` — single-column FK target
 /// - `on_delete = "cascade" | "restrict" | "set_null" | "set_default" | "no_action"`
@@ -114,6 +118,7 @@ const COLUMN_KEYS: &[&str] = &[
     "auto_increment",
     "unique",
     "default",
+    "default_sql",
     "check",
     "references",
     "on_delete",

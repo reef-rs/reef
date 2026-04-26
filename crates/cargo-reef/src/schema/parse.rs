@@ -282,8 +282,22 @@ fn parse_column(field: &Field) -> Result<Column> {
                 "auto_increment" => col.auto_increment = true,
                 "unique" => col.unique = true,
                 "default" => {
+                    if col.default.is_some() {
+                        return Err(meta.error("`default` and `default_sql` are mutually exclusive"));
+                    }
                     let v: Expr = meta.value()?.parse()?;
                     col.default = Some(expr_to_sql_literal(&v));
+                }
+                "default_sql" => {
+                    if col.default.is_some() {
+                        return Err(meta.error("`default` and `default_sql` are mutually exclusive"));
+                    }
+                    // Verbatim SQL — for function defaults like
+                    // `datetime('now')` that aren't expressible as Rust
+                    // literals. We wrap in parens so SQLite parses it as
+                    // an expression rather than a literal.
+                    let v: LitStr = meta.value()?.parse()?;
+                    col.default = Some(format!("({})", v.value()));
                 }
                 "check" => {
                     let v: LitStr = meta.value()?.parse()?;

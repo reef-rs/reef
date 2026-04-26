@@ -395,7 +395,8 @@ cargo reef db:push --features X,Y   # filter cfg-gated tables to this feature se
 
 **Field-level — `#[column(...)]`:**
 - `primary_key`, `auto_increment`, `unique`
-- `default = <expr>` — string literals get SQL-quoted, numerics emit raw
+- `default = <expr>` — Rust literal. String literals get SQL-quoted automatically (`default = "active"` → `DEFAULT 'active'`); numerics/bools emit raw. **Don't add inner quotes** — `default = "'active'"` becomes `DEFAULT '''active'''` (a literal string containing the quote chars).
+- `default_sql = "<sql>"` — verbatim SQL passthrough, paren-wrapped. Use for function calls / expressions: `default_sql = "datetime('now')"` → `DEFAULT (datetime('now'))`. Mutually exclusive with `default`.
 - `check = "<sql_expr>"`, `references = "table(col)"`
 - `on_delete` / `on_update` — `cascade`, `restrict`, `set_null`, `set_default`, `no_action`
 - `generated = "<sql_expr>"`, `generated_kind = "stored"` | `"virtual"`

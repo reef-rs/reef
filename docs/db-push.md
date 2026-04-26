@@ -58,7 +58,19 @@ pub struct User {
 ```
 
 **Table-level**: `name = "..."`, `strict`, `without_rowid`.
-**Field-level `#[column(...)]`**: `primary_key`, `auto_increment`, `unique`, `default = ...`, `check = ...`, `references = "table(col)"`, `on_delete = "..."`, `on_update = "..."`, `generated = "..."`, `generated_kind = "stored" | "virtual"`.
+**Field-level `#[column(...)]`**: `primary_key`, `auto_increment`, `unique`, `default = ...`, `default_sql = "..."`, `check = ...`, `references = "table(col)"`, `on_delete = "..."`, `on_update = "..."`, `generated = "..."`, `generated_kind = "stored" | "virtual"`.
+
+**Defaults: `default` vs `default_sql`** — easy to confuse:
+
+| Form | What you write | What Reef emits |
+|---|---|---|
+| String literal | `default = "active"` | `DEFAULT 'active'` (Reef adds the SQL quotes) |
+| Numeric / bool | `default = 0`, `default = true` | `DEFAULT 0`, `DEFAULT true` (raw) |
+| **SQL expression** | `default_sql = "datetime('now')"` | `DEFAULT (datetime('now'))` (verbatim, paren-wrapped) |
+
+Use `default_sql` whenever you need a SQL function call or expression — `datetime('now')`, `unixepoch()`, etc. The two keys are mutually exclusive on the same column.
+
+**Common mistake:** writing `default = "'active'"` (Rust string containing quotes). Reef adds *another* layer of quoting → `DEFAULT '''active'''`. Drop the inner quotes — Reef handles them.
 **Struct-level helpers**: `#[index(...)]`, `#[primary_key(columns = [...])]`, `#[foreign_key(...)]`, `#[check(name = ..., expr = ...)]`.
 
 FK action values: `cascade`, `restrict`, `set_null`, `set_default`, `no_action`.
