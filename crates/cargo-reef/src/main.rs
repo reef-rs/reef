@@ -349,7 +349,7 @@ fn init_git(target: &Path) {
 
 fn run_dev(extra: &[String]) -> Result<()> {
     print_banner();
-    println!("{}", style("Starting dev loop (dx serve --web)…").dim());
+    println!("{}", style("Starting dev loop (dx serve --web --interactive false)…").dim());
     println!();
 
     // Verify dx is installed before we exec — friendlier error than a "not found" trap
@@ -362,18 +362,34 @@ fn run_dev(extra: &[String]) -> Result<()> {
         );
     }
 
-    // Plain pass-through. Earlier versions wrapped dx in a new process group
-    // with a custom signal handler to clean up orphaned children — that turned
-    // out to fight dx's own subprocess management and produced intermittent
-    // SIGKILLs we couldn't reliably reproduce. dx handles its own Ctrl-C
-    // cleanup correctly when invoked directly; we just inherit stdio and wait.
+    // Disable dx's interactive TUI dashboard. dx 0.7's TUI mode has a bug on
+    // macOS arm64 (and possibly elsewhere) where the process gets SIGKILLed
+    // after running for a few minutes. Bisected by reproducing with bare
+    // `dx serve --web` (TUI on, dies) vs `dx serve --web --interactive false`
+    // (TUI off, stable indefinitely). Same `--web` build path either way; the
+    // only difference is dx's terminal ownership / dashboard rendering.
     //
-    // If `cargo reef dev` ever feels flaky, swap it for `dx serve --web` to
-    // confirm it's not us — behavior should be identical.
+    // Cost: users lose the interactive shortcuts (`r` rebuild, `p` pause,
+    // etc.). Trade is worth it — those shortcuts are nice-to-haves, but a
+    // dev server that randomly dies every 5-30 minutes isn't.
+    //
+    // If/when dx fixes the TUI issue upstream, drop `--interactive false`
+    // and let dx default back to its dashboard.
+    //
+    // Users who explicitly want the dashboard back can pass it themselves:
+    //   cargo reef dev -- --interactive
+    let user_set_interactive = extra
+        .iter()
+        .any(|a| a == "--interactive" || a == "-i" || a.starts_with("--interactive="));
+    let mut args: Vec<String> = vec!["serve".into(), "--web".into()];
+    if !user_set_interactive {
+        args.push("--interactive".into());
+        args.push("false".into());
+    }
+    args.extend(extra.iter().cloned());
+
     let status = std::process::Command::new("dx")
-        .arg("serve")
-        .arg("--web")
-        .args(extra)
+        .args(&args)
         .status()
         .context("launching dx serve")?;
     if !status.success() {
