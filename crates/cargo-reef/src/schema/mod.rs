@@ -11,9 +11,11 @@
 //! suggestion.
 
 mod emit;
+mod introspect;
 mod ir;
 mod parse;
 mod types;
 
 pub use emit::emit_schema;
+pub use introspect::introspect_db;
 pub use parse::parse_file;

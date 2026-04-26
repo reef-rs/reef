@@ -86,6 +86,15 @@ enum ReefCommand {
         #[arg(default_value = "src/server/db/schema.rs")]
         path: std::path::PathBuf,
     },
+
+    /// Introspect a live SQLite/libSQL database and print the IR as JSON.
+    /// Hidden — used to eyeball the introspector before `db:push` lands.
+    #[command(name = "_debug-introspect", hide = true)]
+    DebugIntrospect {
+        /// Path to the SQLite database file.
+        #[arg(default_value = "./data/reef.db")]
+        db: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +124,7 @@ fn main() -> ExitCode {
         ReefCommand::Migrate { cmd } => run_migrate(cmd),
         ReefCommand::DebugSchema { path } => debug_schema(&path),
         ReefCommand::DebugSql { path } => debug_sql(&path),
+        ReefCommand::DebugIntrospect { db } => block_on(debug_introspect(&db)),
     };
 
     match result {
@@ -698,5 +708,20 @@ fn debug_sql(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("parsing {}", path.display()))?;
     let stmts = schema::emit_schema(&schema);
     println!("{}", stmts.join("\n\n"));
+    Ok(())
+}
+
+async fn debug_introspect(db_path: &std::path::Path) -> Result<()> {
+    if !db_path.exists() {
+        bail!("database file not found: {}", db_path.display());
+    }
+    let db = libsql::Builder::new_local(db_path)
+        .build()
+        .await
+        .context("opening libSQL database")?;
+    let conn = db.connect().context("connecting to libSQL database")?;
+    let schema = schema::introspect_db(&conn).await?;
+    let json = serde_json::to_string_pretty(&schema).context("rendering schema as JSON")?;
+    println!("{json}");
     Ok(())
 }
